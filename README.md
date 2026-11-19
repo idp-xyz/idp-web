@@ -24,6 +24,8 @@ make build              # bin/idp-web
 bash deploy/build.sh    # 镜像（scratch，用户 65532）：宿主上静态编译，再 docker build --network none
 ```
 
+CI 里的第三方镜像（扫描用的 trivy）先由 `deploy/pull-image.sh` 显式拉取并重试（最多 5 次，间隔 15、30、60、120 秒；本机已有则跳过），因为公共 registry 对匿名拉取按来源地址限流，而 CI 的 runner 与许多项目共用地址。
+
 运行：见下面"本机用 fixture 运行"。配置项见 `cmd/idp-web/main.go` 文件头与下表。绑定非回环地址必须设置 `IDP_WEB_PRIVATE_NETWORK=true`：服务器自己没有认证，只有网关能到达它。
 
 ## 在 Kubernetes 上
