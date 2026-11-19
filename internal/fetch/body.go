@@ -66,10 +66,30 @@ func (r *Reader) page(ctx context.Context, resp *http.Response, final addr.Addre
 		r.log.Info("extraction failed", "err", err)
 		return Page{}, ErrUnreadable
 	}
-	if isBotCheck(text, res.Title, res.Markdown) {
-		return Page{}, ErrBotCheck
+	if rule, err := notThePage(text, res); err != nil {
+		if rule != "" {
+			r.log.Info("the page needs script", "rule", rule) // which sign found it, for whoever reads the log (D27)
+		}
+		return Page{}, err
 	}
 	return Page{FinalURL: finalURL, Title: res.Title, Text: res.Markdown, Bytes: len(body), Type: kind, Engine: res.Engine}, nil
+}
+
+// notThePage reports the pages that extraction read correctly and that are still not the article: a challenge (D12)
+// or a frame whose article script writes (D27). The bot check is asked first and keeps its reason: a challenge page is
+// also short and full of script, and "the site took you for a robot" is what the model must learn, because the
+// remedy is a different source for a reason that may pass, where a page that needs script will not pass by itself.
+// Both are asked of res, the text after the fallback of D5, so a page the plain reader rescued is judged by what the
+// model would get.
+// The first result is the name of the rule that found a page that needs script, "" otherwise.
+func notThePage(rawHTML string, res extract.Result) (rule string, err error) {
+	if isBotCheck(rawHTML, res.Title, res.Markdown) {
+		return "", ErrBotCheck
+	}
+	if rule := needsScript(rawHTML, res.Markdown); rule != "" {
+		return rule, ErrNeedsScript
+	}
+	return "", nil
 }
 
 // bodyError keeps the errors readBody means for the model and turns the rest (a connection that broke while the body

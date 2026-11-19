@@ -26,10 +26,12 @@ import (
 	"idp-web/internal/tenants"
 )
 
-// Metrics counts calls by tool and outcome, and refusals by reason (read by the /metrics endpoint).
+// Metrics counts calls by tool and outcome, refusals by reason, and the calls that the web did not answer by reason
+// (read by the /metrics endpoint).
 type Metrics interface {
 	Observe(tool, outcome string, d time.Duration)
 	Refused(tool, reason string)
+	Failed(tool, reason string)
 }
 
 // Reader is the page reader (internal/fetch.Reader).
@@ -135,6 +137,9 @@ func (a *api) fail(tool string, au *audit, err error) mcp.Result {
 	}
 	if o.decision == decisionRefused {
 		a.met.Refused(tool, o.reason)
+	}
+	if o.decision == decisionFailed {
+		a.met.Failed(tool, o.reason) // needs_script among them: its share of web_fetch decides the renderer (platform ADR-0003 appendix D, 6)
 	}
 	return mcp.Result{Text: o.text, IsError: true}
 }

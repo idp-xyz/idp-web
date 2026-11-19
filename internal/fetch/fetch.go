@@ -49,6 +49,7 @@ var (
 	ErrPDF              = errors.New("the page is a PDF, which is not supported yet")
 	ErrEncoding         = errors.New("the content encoding is not read")
 	ErrBotCheck         = errors.New("the site answered with a bot check instead of the page")
+	ErrNeedsScript      = errors.New("the content of this page is produced by script and cannot be read now")
 	ErrStatus           = errors.New("the site answered with an HTTP error status")
 	ErrTooManyRedirects = errors.New("the address redirects more than 5 times")
 	ErrConnect          = errors.New("cannot connect to the site, or its answer was not a valid web page response")

@@ -37,6 +37,15 @@ func (c *counting) Refused(tool, reason string) {
 	c.calls["refused/"+tool+"/"+reason]++
 }
 
+func (c *counting) Failed(tool, reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.calls == nil {
+		c.calls = map[string]int{}
+	}
+	c.calls["failed/"+tool+"/"+reason]++
+}
+
 const meta = `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}`
 
 // call posts a tools/call as the given forwarded caller ("" forwards none) and returns the HTTP status and the result.

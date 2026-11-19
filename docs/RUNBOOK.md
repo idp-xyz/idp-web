@@ -99,7 +99,7 @@ tenants:
 ## 6. 日志与指标
 
 - **审计**：标准输出上的 JSON，每次工具调用一行 `"msg":"audit"`，字段：`tool`、`outcome`、`ms`、`tenant`、`caller`（租户与主体的短哈希，不记成员标识本身）、`query` 与 `url`（明文：它们就是外发的内容，包括被拒绝的地址）、`results`、`dropped`、`bytes`、`cache`、`decision`（`allowed`、`refused`、`failed`）、`reason`。**没有 `ref`、密钥、页面文字**（D23）。`kubectl -n idp-web logs deploy/idp-web | grep '"msg":"audit"'`。留存期是集群日志策略的事，不在本服务里。
-- **指标**：`idp_web_calls_total{tool,outcome}`、`idp_web_refused_total{tool,reason}`、`idp_web_call_seconds_total{tool}`，在 9580，只放 `observability` 命名空间抓取。
+- **指标**：`idp_web_calls_total{tool,outcome}`、`idp_web_refused_total{tool,reason}`、`idp_web_failed_total{tool,reason}`（网站或服务商没给出的调用，按原因）、`idp_web_call_seconds_total{tool}`，在 9580，只放 `observability` 命名空间抓取。
 - **拒绝原因**（审计里的 `reason`，指标里的 `reason`）：
 
 | `reason` | `decision` | 含义与处理 |
@@ -117,6 +117,7 @@ tenants:
 | `invalid_arguments`、`no_caller` | `refused` | 参数不合 schema；请求没带调用者（没经过网关） |
 | `provider_busy`、`provider_error` | `failed` | 搜索服务限流或出错：看服务商的状态与密钥；日志里有详情（`search provider request failed` 或 `search provider answered with an error`，带状态码） |
 | `too_large`、`too_slow`、`content_type`、`pdf`、`encoding`、`bot_check`、`http_status`、`redirects`、`connect`、`unreadable` | `failed` | 网站没给出可读的内容（太大、太慢、不是文字、是 PDF、编码不认识、要人机验证、非 2xx、重定向太多、连不上、提取不出文字） |
+| `needs_script` | `failed` | 页面的正文由脚本生成，只读 HTML 看不到（框架页：空的挂载点、要求开启 JavaScript 的提示、正文在脚本字符串里），文字又很少；模型读到"换一个来源，或用搜索结果的摘录"。这类调用占 `web_fetch` 的份额（`idp_web_failed_total{tool="web_fetch",reason="needs_script"}` 除以 `idp_web_calls_total{tool="web_fetch"}`）是平台 ADR-0003 附录 D 第 6 节决定渲染器做不做的数据，门槛 5%；它是下限（见 ADR-0001 D27 的"不识别的"）。日志里 `the page needs script` 一行带规则名（`empty_mount`、`placeholder_mount`、`skeleton`、`noscript_notice`、`script_prose`）。验证页仍是 `bot_check`，不是它 |
 | `unavailable`、`internal`、`canceled` | `failed` | 服务自己的问题或调用被取消：日志里 `tool failed` 有详情 |
 
 ## 7. 故障排查

@@ -84,6 +84,7 @@ type metrics struct {
 	counts  map[[2]string]int64
 	nanos   map[string]int64
 	refused map[[2]string]int64
+	failed  map[[2]string]int64
 }
 
 func (m *metrics) Observe(tool, outcome string, d time.Duration) {
@@ -97,6 +98,17 @@ func (m *metrics) Observe(tool, outcome string, d time.Duration) {
 func (m *metrics) Refused(tool, reason string) {
 	m.mu.Lock()
 	m.refused[[2]string{tool, reason}]++
+	m.mu.Unlock()
+}
+
+// Failed counts a call that the web or the search service did not answer, by tool and reason (ADR-0001 D24, D27). Its
+// needs_script share of web_fetch is the number that decides whether a renderer is built.
+func (m *metrics) Failed(tool, reason string) {
+	m.mu.Lock()
+	if m.failed == nil {
+		m.failed = map[[2]string]int64{}
+	}
+	m.failed[[2]string{tool, reason}]++
 	m.mu.Unlock()
 }
 
@@ -132,6 +144,20 @@ func (m *metrics) write(w http.ResponseWriter) {
 	})
 	for _, k := range rk {
 		fmt.Fprintf(w, "idp_web_refused_total{tool=%q,reason=%q} %d\n", k[0], k[1], m.refused[k])
+	}
+	fmt.Fprintln(w, "# TYPE idp_web_failed_total counter")
+	fk := make([][2]string, 0, len(m.failed))
+	for k := range m.failed {
+		fk = append(fk, k)
+	}
+	sort.Slice(fk, func(i, j int) bool {
+		if fk[i][0] != fk[j][0] {
+			return fk[i][0] < fk[j][0]
+		}
+		return fk[i][1] < fk[j][1]
+	})
+	for _, k := range fk {
+		fmt.Fprintf(w, "idp_web_failed_total{tool=%q,reason=%q} %d\n", k[0], k[1], m.failed[k])
 	}
 	fmt.Fprintln(w, "# TYPE idp_web_call_seconds_total counter")
 	tn := make([]string, 0, len(m.nanos))
@@ -186,7 +212,7 @@ func main() {
 		fatal(err)
 	}
 	log.Info("configured", "provider", cfg.providerName, "tenants", cfg.tenants.Count(), "searches", cfg.limits.Searches, "reads", cfg.limits.Reads, "windowSeconds", int(cfg.limits.Window.Seconds()))
-	met := &metrics{counts: map[[2]string]int64{}, nanos: map[string]int64{}, refused: map[[2]string]int64{}}
+	met := &metrics{counts: map[[2]string]int64{}, nanos: map[string]int64{}, refused: map[[2]string]int64{}, failed: map[[2]string]int64{}}
 	srv := mcp.New("idp-web", version,
 		"Searches the web and reads pages: web_search returns results with a ref, web_fetch reads a result with its ref, web_open_url reads an address the member gave and needs the member's confirmation.",
 		tools.New(tools.Config{Log: log, Metrics: met, RequireCaller: requireCaller, Provider: cfg.provider, Reader: newReader(log, testOrigins),

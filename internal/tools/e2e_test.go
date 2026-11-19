@@ -722,7 +722,7 @@ func TestEverySentinelHasAFixedSentence(t *testing.T) {
 		tenants.ErrDisabled, tenants.ErrOpenDisabled, tenants.ErrExcluded, tenants.ErrNotIncluded,
 		search.ErrUnavailable, search.ErrBusy,
 		fetch.ErrNotPublic, fetch.ErrRobots, fetch.ErrTooLarge, fetch.ErrTooSlow, fetch.ErrType, fetch.ErrPDF, fetch.ErrEncoding,
-		fetch.ErrBotCheck, fetch.ErrStatus, fetch.ErrTooManyRedirects, fetch.ErrConnect, fetch.ErrUnreadable,
+		fetch.ErrBotCheck, fetch.ErrNeedsScript, fetch.ErrStatus, fetch.ErrTooManyRedirects, fetch.ErrConnect, fetch.ErrUnreadable,
 		fmt.Errorf("%w: the scheme %q is not http or https", errAddrRefused(), "ftp"),
 	} {
 		o, known := classify(err)
@@ -762,5 +762,23 @@ func TestARefusedReadDoesNotUseTheReadQuota(t *testing.T) {
 	good := w.url("allowed.test", "/article")
 	if got := w.as("acme", "alice", "web_fetch", map[string]any{"url": good, "ref": w.keys.Make("acme/alice", good)}); isErr(got) {
 		t.Fatalf("the one read of the quota was used up by refusals: %s", text(got))
+	}
+}
+
+// A page that script writes is told to the model in a sentence it can act on, audited as needs_script, and counted by
+// itself among the calls the web did not answer, not among our refusals (ADR-0001 D27): its share of web_fetch calls
+// is the number that decides the renderer of platform ADR-0003 appendix D.
+func TestAPageThatNeedsScriptIsTheModelsSentenceTheAuditReasonAndItsOwnCount(t *testing.T) {
+	w := newWorld(t, options{reader: brokenReader{fetch.ErrNeedsScript}})
+	got := w.as("opener", "alice", "web_open_url", map[string]any{"url": w.url("allowed.test", "/article")})
+	want := "the content of this page is produced by script and cannot be read now: use another source, or the excerpt of the search result"
+	if !isErr(got) || text(got) != want {
+		t.Fatalf("%v", got)
+	}
+	if !strings.Contains(w.log.String(), `"decision":"failed","reason":"needs_script"`) {
+		t.Errorf("not audited as needs_script: %s", w.log.String())
+	}
+	if w.met.calls["failed/web_open_url/needs_script"] != 1 || w.met.calls["refused/web_open_url/needs_script"] != 0 {
+		t.Errorf("%v", w.met.calls)
 	}
 }

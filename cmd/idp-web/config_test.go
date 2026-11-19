@@ -127,13 +127,27 @@ func TestReadyzIsNotReadyUntilTheProviderTheRefKeyAndTheTenantsAreLoaded(t *test
 }
 
 func TestTheRefusedCounterIsWrittenByToolAndReason(t *testing.T) {
-	m := &metrics{counts: map[[2]string]int64{}, nanos: map[string]int64{}, refused: map[[2]string]int64{}}
+	m := &metrics{counts: map[[2]string]int64{}, nanos: map[string]int64{}, refused: map[[2]string]int64{}, failed: map[[2]string]int64{}}
 	m.Refused("web_fetch", "ref_mismatch")
 	m.Refused("web_fetch", "ref_mismatch")
 	m.Refused("web_search", "rate_limited")
 	w := httptest.NewRecorder()
 	m.write(w)
 	for _, want := range []string{`idp_web_refused_total{tool="web_fetch",reason="ref_mismatch"} 2`, `idp_web_refused_total{tool="web_search",reason="rate_limited"} 1`} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("missing %s in\n%s", want, w.Body)
+		}
+	}
+}
+
+func TestTheFailedCounterIsWrittenByToolAndReasonSoThatNeedsScriptHasItsOwnLine(t *testing.T) {
+	m := &metrics{counts: map[[2]string]int64{}, nanos: map[string]int64{}, refused: map[[2]string]int64{}, failed: map[[2]string]int64{}}
+	m.Failed("web_fetch", "needs_script")
+	m.Failed("web_fetch", "needs_script")
+	m.Failed("web_fetch", "bot_check")
+	w := httptest.NewRecorder()
+	m.write(w)
+	for _, want := range []string{`idp_web_failed_total{tool="web_fetch",reason="needs_script"} 2`, `idp_web_failed_total{tool="web_fetch",reason="bot_check"} 1`} {
 		if !strings.Contains(w.Body.String(), want) {
 			t.Errorf("missing %s in\n%s", want, w.Body)
 		}

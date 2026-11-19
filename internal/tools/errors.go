@@ -87,6 +87,7 @@ var mappings = []mapping{
 	{fetch.ErrPDF, "pdf", decisionFailed, ""},
 	{fetch.ErrEncoding, "encoding", decisionFailed, ""},
 	{fetch.ErrBotCheck, "bot_check", decisionFailed, ""},
+	{fetch.ErrNeedsScript, "needs_script", decisionFailed, "the content of this page is produced by script and cannot be read now: use another source, or the excerpt of the search result"},
 	{fetch.ErrStatus, "http_status", decisionFailed, ""},
 	{fetch.ErrTooManyRedirects, "redirects", decisionFailed, ""},
 	{fetch.ErrConnect, "connect", decisionFailed, ""},

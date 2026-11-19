@@ -40,7 +40,7 @@ CI 里的第三方镜像（扫描用的 trivy）先由 `deploy/pull-image.sh` �
 |---|---|---|
 | `IDP_WEB_LISTEN` | `127.0.0.1:8580` | `/mcp` 的地址；非回环地址要同时设 `IDP_WEB_PRIVATE_NETWORK=true` |
 | `IDP_WEB_PRIVATE_NETWORK` | 空 | 运维的声明：只有网关能到达本服务 |
-| `IDP_WEB_METRICS` | `127.0.0.1:9580` | `/healthz`、`/readyz`（服务商、`ref` 密钥、租户文件都载入了才是 200）、`/metrics`（`idp_web_calls_total{tool,outcome}`、`idp_web_refused_total{tool,reason}`、`idp_web_call_seconds_total{tool}`） |
+| `IDP_WEB_METRICS` | `127.0.0.1:9580` | `/healthz`、`/readyz`（服务商、`ref` 密钥、租户文件都载入了才是 200）、`/metrics`（`idp_web_calls_total{tool,outcome}`、`idp_web_refused_total{tool,reason}`、`idp_web_failed_total{tool,reason}`、`idp_web_call_seconds_total{tool}`） |
 | `IDP_WEB_CALLER_KEYS_FILE` | 空 | 网关的公钥（PEM，P-256，可放几把）；设了之后每个 `tools/call` 必须带网关的签名断言 |
 | `IDP_WEB_CALLER_AUDIENCE` | 空 | 本服务在 idp-mcp 里登记的端点，如 `http://web:8580/mcp`；与上一项要么都设、要么都不设 |
 | `IDP_WEB_TEST_ORIGINS` | 空 | 只用于测试：免检的 `主机:端口`（ADR-0001 D14） |
