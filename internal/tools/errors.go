@@ -75,8 +75,11 @@ var mappings = []mapping{
 	{search.ErrBusy, "provider_busy", decisionFailed, "the search service is busy: try again in a little while, or answer with what you have"},
 	{search.ErrUnavailable, "provider_error", decisionFailed, "the search failed: try again with other words, or answer with what you have"},
 	// the address rules (addr) and the reader (fetch): their messages are written for the model and never name internals
-	{addr.ErrRefused, "address_refused", decisionRefused, ""},
+	// the more specific row comes first: addr.ErrNotPublic also satisfies errors.Is(err, addr.ErrRefused), so with the
+	// rows the other way round no address was ever recorded as not public and an operator reading the audit could not
+	// tell a malformed address from one that points inside. Keep any row whose error wraps another's above it.
 	{fetch.ErrNotPublic, "address_not_public", decisionRefused, ""},
+	{addr.ErrRefused, "address_refused", decisionRefused, ""},
 	{fetch.ErrRobots, "robots", decisionRefused, ""},
 	{fetch.ErrTooLarge, "too_large", decisionFailed, ""},
 	{fetch.ErrTooSlow, "too_slow", decisionFailed, ""},

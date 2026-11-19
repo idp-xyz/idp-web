@@ -50,6 +50,7 @@ func call(t *testing.T, s *mcp.Server, caller, tool string, args any) (int, map[
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + tool + `","arguments":` + string(a) + `,` + m + `}}}`
 	r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
 	r.Header.Set("MCP-Protocol-Version", mcp.ProtocolVersion)
+	r.Header.Set("Mcp-Method", "tools/call")
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, r)
 	var out map[string]any
@@ -204,6 +205,7 @@ func TestWithAVerifierAnUnsignedCallGets403AndNoHandlerRuns(t *testing.T) {
 	for id, method := range []string{"tools/list", "server/discover"} {
 		r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q,"params":{%s}}}`, id+1, method, meta)))
 		r.Header.Set("MCP-Protocol-Version", mcp.ProtocolVersion)
+		r.Header.Set("Mcp-Method", method)
 		w := httptest.NewRecorder()
 		s.ServeHTTP(w, r)
 		if w.Code != 200 {

@@ -110,7 +110,8 @@ tenants:
 | `tenant_disabled` | `refused` | 租户没有启用：第 4 节 |
 | `open_url_disabled` | `refused` | 租户 `openUrl` 为 false |
 | `domain_excluded`、`domain_not_included` | `refused` | 租户的域名名单 |
-| `address_refused`、`address_not_public` | `refused` | 地址不是普通的公网 http(s) 地址（私网、回环、元数据、带用户名密码、非规范写法），或域名解析到了不公开的地址 |
+| `address_refused` | `refused` | 地址的写法不被接受：不是 http 或 https、端口不是 80 或 443、带用户名密码、非规范的 IP 写法（`2130706433`、`0x7f.1`）、格式错误、过长。还没有碰到地址指向哪里 |
+| `address_not_public` | `refused` | 地址指向内部：IP 字面量不是公网地址（私网、回环、链路本地与元数据、CGNAT、多播、内嵌 IPv4 的 IPv6），或域名解析到了这样的地址，或重定向去了这样的地址。大量出现说明有页面或模型在试探内网（此前这一类也记为 `address_refused`，2026-11-19 起分开） |
 | `robots` | `refused` | 站点的 robots.txt 不许读 |
 | `rate_limited` | `refused` | 调用者超过窗口内的搜索或读取次数（`IDP_WEB_LIMIT_*`） |
 | `invalid_arguments`、`no_caller` | `refused` | 参数不合 schema；请求没带调用者（没经过网关） |

@@ -220,6 +220,7 @@ func (w *world) as(tenant, subject, tool string, args any) map[string]any {
 		tool, a, meta, subject, tenant)
 	r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
 	r.Header.Set("MCP-Protocol-Version", mcp.ProtocolVersion)
+	r.Header.Set("Mcp-Method", "tools/call")
 	rec := httptest.NewRecorder()
 	w.srv.ServeHTTP(rec, r)
 	var out map[string]any
