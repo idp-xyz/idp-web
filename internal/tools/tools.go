@@ -1,6 +1,10 @@
-// Package tools declares idp-web's three MCP tools: web_search, web_fetch and web_open_url (ADR-0001 D3, platform
-// ADR-0003 D2). The schemas and annotations here are final, because idp-mcp's gateway pins them at review. The handlers
-// are not: each answers with a fixed "not available yet" error until the later tasks (search, fetch) replace it.
+// Package tools implements idp-web's three MCP tools: web_search, web_fetch and web_open_url (ADR-0001 D3, D16 to D24,
+// platform ADR-0003 D2). The schemas and annotations are final, because idp-mcp's gateway pins them at review.
+//
+// web_fetch reads an address only with the ref a search made for it, for this caller (platform ADR-0003 7.3 T1, T2);
+// web_open_url reads an address the member gave, only for a tenant that turned it on. Both enforce the tenant's domain
+// lists on the first address and on every redirect, read through the reader (internal/fetch), cut the text into parts
+// and cite what they return. Every call is limited per caller, counted, and audited in one JSON line.
 package tools
 
 import (
@@ -9,27 +13,28 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 	"unicode/utf8"
 
+	"idp-web/internal/fetch"
 	"idp-web/internal/mcp"
+	"idp-web/internal/refs"
+	"idp-web/internal/search"
+	"idp-web/internal/tenants"
 )
 
-// The sentinel errors are what a model is told, so each is a sentence it can act on. Anything else that goes wrong
-// is logged and the model gets a fixed sentence (ADR-0001 D3: internals stay in the log).
-var (
-	ErrNotAvailable = errors.New("web search is not available yet")
-	ErrInvalid      = errors.New("the arguments are not valid")
-	ErrNoCaller     = errors.New("no caller identity: this server must be registered with identity=forward")
-)
-
-// Metrics counts calls by tool and outcome (read by the /metrics endpoint).
+// Metrics counts calls by tool and outcome, and refusals by reason (read by the /metrics endpoint).
 type Metrics interface {
 	Observe(tool, outcome string, d time.Duration)
+	Refused(tool, reason string)
+}
+
+// Reader is the page reader (internal/fetch.Reader).
+type Reader interface {
+	Read(ctx context.Context, rawURL string) (fetch.Page, error)
 }
 
 // Limits of the arguments, in the schemas and checked again here: the gateway validates against the pinned schema, but
@@ -42,16 +47,65 @@ const (
 	maxOffset = 1 << 30
 )
 
+// defaultCount is how many results a search returns when the caller does not say (the schema says 5).
+const defaultCount = 5
+
 var freshnessValues = []string{"day", "week", "month", "year"}
 
+// Limits per caller in a sliding window (appendix C 2 item 4): the defaults are 30 searches and 30 reads in 10 minutes.
+type Limits struct {
+	Searches, Reads int
+	Window          time.Duration
+}
+
+// DefaultLimits are used for a zero field of Config.Limits.
+var DefaultLimits = Limits{Searches: 30, Reads: 30, Window: 10 * time.Minute}
+
+// Config is everything the tools need. Only Log, Metrics and RequireCaller are needed to declare them; the rest to call
+// them (a missing Provider answers ErrNotAvailable, a missing Tenants set enables nobody).
+type Config struct {
+	Log           *slog.Logger
+	Metrics       Metrics
+	RequireCaller bool
+
+	Provider search.Provider
+	Reader   Reader
+	Keys     *refs.Keys
+	Tenants  *tenants.Set
+	// TestOrigins are exempt from the address rules, for tests only (ADR-0001 D14); the same set the reader has.
+	TestOrigins map[string]bool
+
+	Limits Limits
+	// Cache bounds: entries and bytes of decoded page text (defaults 256 pages, 64 MiB).
+	CacheEntries, CacheBytes int
+	Now                      func() time.Time
+}
+
 // handler does the work of one tool for a verified caller. The caller is never an argument: tenant and subject come
-// from the gateway's assertion (ADR-0001 D2).
-type handler func(ctx context.Context, caller mcp.Caller, args map[string]json.RawMessage) mcp.Result
+// from the gateway's assertion (ADR-0001 D2). It fills the audit record as it learns things.
+type handler func(ctx context.Context, caller mcp.Caller, args map[string]json.RawMessage, au *audit) mcp.Result
 
 type api struct {
-	log           *slog.Logger
-	met           Metrics
-	requireCaller bool
+	cfg     Config
+	log     *slog.Logger
+	met     Metrics
+	sources *sources
+	cache   *pageCache
+	limits  *limiter
+}
+
+// audit is what one call says about itself (appendix C 4.7, ADR-0001 D23). It holds the query and the address in clear,
+// because they are what leaves the enterprise, and never the ref, a key or page text.
+type audit struct {
+	tenant   string
+	query    string
+	url      string
+	results  int
+	dropped  int
+	bytes    int
+	cache    bool
+	decision string
+	reason   string
 }
 
 // decode reads the arguments strictly: a field the schema does not name is an error, not ignored.
@@ -67,11 +121,22 @@ func decode(args map[string]json.RawMessage, into any) error {
 
 // failure turns an error into a tool error the model can act on; internals stay in the log.
 func failure(err error) mcp.Result {
-	switch {
-	case errors.Is(err, ErrNotAvailable), errors.Is(err, ErrInvalid), errors.Is(err, ErrNoCaller):
-		return mcp.Result{Text: err.Error(), IsError: true}
+	o, _ := classify(err)
+	return mcp.Result{Text: o.text, IsError: true}
+}
+
+// fail is failure for a handler: it also records the decision and the reason in the audit line, counts a refusal, and
+// logs the detail of an error that no sentence is written for.
+func (a *api) fail(tool string, au *audit, err error) mcp.Result {
+	o, known := classify(err)
+	au.decision, au.reason = o.decision, o.reason
+	if !known {
+		a.log.Error("tool failed", "tool", tool, "err", err)
 	}
-	return mcp.Result{Text: "the web tool failed to complete the request", IsError: true}
+	if o.decision == decisionRefused {
+		a.met.Refused(tool, o.reason)
+	}
+	return mcp.Result{Text: o.text, IsError: true}
 }
 
 func obj(props map[string]any, required ...string) map[string]any {
@@ -90,24 +155,27 @@ func short(id string) string {
 	return hex.EncodeToString(h[:4])
 }
 
-// wrap adds what every tool shares: the caller check, the metrics and one audit line. The audit line names the tool, the
-// outcome and the caller's hash, never the arguments' content.
+// wrap adds what every tool shares: the caller check, the metrics and one audit line (ADR-0001 D23).
 func (a *api) wrap(name string, h handler) func(*http.Request, map[string]json.RawMessage) mcp.Result {
 	return func(r *http.Request, args map[string]json.RawMessage) mcp.Result {
-		start := time.Now()
+		start := a.cfg.Now()
 		caller := mcp.CallerFrom(r)
+		au := &audit{tenant: caller.Tenant, decision: "allowed", reason: "ok"}
 		var res mcp.Result
-		if a.requireCaller && caller.Subject == "" {
-			res = failure(ErrNoCaller)
+		if a.cfg.RequireCaller && caller.Subject == "" {
+			res = a.fail(name, au, ErrNoCaller)
 		} else {
-			res = h(r.Context(), caller, args)
+			res = h(r.Context(), caller, args, au)
 		}
 		outcome := "ok"
 		if res.IsError {
 			outcome = "error"
 		}
-		a.met.Observe(name, outcome, time.Since(start))
-		a.log.Info("tool", "tool", name, "outcome", outcome, "ms", time.Since(start).Milliseconds(), "caller", short(caller.Owner()))
+		d := a.cfg.Now().Sub(start)
+		a.met.Observe(name, outcome, d)
+		a.log.Info("audit", "tool", name, "outcome", outcome, "ms", d.Milliseconds(), "tenant", au.tenant,
+			"caller", short(caller.Owner()), "query", au.query, "url", au.url, "results", au.results, "dropped", au.dropped,
+			"bytes", au.bytes, "cache", au.cache, "decision", au.decision, "reason", au.reason)
 		return res
 	}
 }
@@ -155,20 +223,32 @@ func checkOffset(o int) error {
 	return nil
 }
 
-// notAvailable is the handler of every tool in this skeleton: it checks the arguments as the real handler will and
-// then says the service is not there yet. Later tasks replace the body, not the schemas.
-func notAvailable(check func(map[string]json.RawMessage) error) handler {
-	return func(_ context.Context, _ mcp.Caller, args map[string]json.RawMessage) mcp.Result {
-		if err := check(args); err != nil {
-			return failure(err)
-		}
-		return failure(ErrNotAvailable)
+// New returns the tools. With RequireCaller a call without a caller is refused (ADR-0001 D2).
+func New(cfg Config) []mcp.Tool {
+	if cfg.Log == nil {
+		cfg.Log = slog.New(slog.DiscardHandler)
 	}
-}
-
-// New returns the tools. With requireCaller a call without a caller is refused (ADR-0001 D2).
-func New(log *slog.Logger, met Metrics, requireCaller bool) []mcp.Tool {
-	a := &api{log: log, met: met, requireCaller: requireCaller}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	if cfg.Limits.Searches == 0 {
+		cfg.Limits.Searches = DefaultLimits.Searches
+	}
+	if cfg.Limits.Reads == 0 {
+		cfg.Limits.Reads = DefaultLimits.Reads
+	}
+	if cfg.Limits.Window == 0 {
+		cfg.Limits.Window = DefaultLimits.Window
+	}
+	if cfg.CacheEntries == 0 {
+		cfg.CacheEntries = 256
+	}
+	if cfg.CacheBytes == 0 {
+		cfg.CacheBytes = 64 << 20
+	}
+	a := &api{cfg: cfg, log: cfg.Log, met: cfg.Metrics,
+		sources: newSources(cfg.Now), cache: newPageCache(cfg.Now, cfg.CacheEntries, cfg.CacheBytes),
+		limits: newLimiter(cfg.Now, cfg.Limits.Window, map[string]int{"searches": cfg.Limits.Searches, "reads": cfg.Limits.Reads})}
 	return []mcp.Tool{
 		{Name: "web_search",
 			Description: "Search the web and return a numbered list of results: title, address, a reference (ref) for the address, the publication date when known and an excerpt. Read a result with web_fetch, giving its address and its ref exactly as listed.",
@@ -178,19 +258,7 @@ func New(log *slog.Logger, met Metrics, requireCaller bool) []mcp.Tool {
 				"count":     map[string]any{"type": "integer", "minimum": 1, "maximum": maxCount, "description": "How many results to return (default 5)."},
 			}, "query"),
 			Annotations: readOnlyOpenWorld(),
-			Call: a.wrap("web_search", notAvailable(func(args map[string]json.RawMessage) error {
-				var in searchArgs
-				if err := decode(args, &in); err != nil {
-					return err
-				}
-				if in.Freshness != "" && !contains(freshnessValues, in.Freshness) {
-					return fmt.Errorf("%w: freshness must be day, week, month or year", ErrInvalid)
-				}
-				if in.Count != nil && (*in.Count < 1 || *in.Count > maxCount) {
-					return fmt.Errorf("%w: count must be 1 to %d", ErrInvalid, maxCount)
-				}
-				return checkQuery(in.Query)
-			}))},
+			Call:        a.wrap("web_search", a.search)},
 		{Name: "web_fetch",
 			Description: "Read a page that web_search returned. Give the address and the ref listed next to it; an address without its matching ref is refused. Returns the page text as Markdown in pieces: pass offset to continue.",
 			InputSchema: obj(map[string]any{
@@ -199,19 +267,7 @@ func New(log *slog.Logger, met Metrics, requireCaller bool) []mcp.Tool {
 				"offset": map[string]any{"type": "integer", "minimum": 0, "description": "Where to continue in the page text (default 0)."},
 			}, "url", "ref"),
 			Annotations: readOnlyOpenWorld(),
-			Call: a.wrap("web_fetch", notAvailable(func(args map[string]json.RawMessage) error {
-				var in fetchArgs
-				if err := decode(args, &in); err != nil {
-					return err
-				}
-				if in.Ref == "" || len(in.Ref) > maxRef {
-					return fmt.Errorf("%w: ref must be 1 to %d characters", ErrInvalid, maxRef)
-				}
-				if err := checkURL(in.URL); err != nil {
-					return err
-				}
-				return checkOffset(in.Offset)
-			}))},
+			Call:        a.wrap("web_fetch", a.fetch)},
 		{Name: "web_open_url",
 			Description: "Read a page at an address the member gave. Unlike web_fetch this needs no ref, so the member is asked to confirm the address first. Returns the page text as Markdown in pieces: pass offset to continue.",
 			InputSchema: obj(map[string]any{
@@ -219,16 +275,7 @@ func New(log *slog.Logger, met Metrics, requireCaller bool) []mcp.Tool {
 				"offset": map[string]any{"type": "integer", "minimum": 0, "description": "Where to continue in the page text (default 0)."},
 			}, "url"),
 			Annotations: readOnlyOpenWorld(),
-			Call: a.wrap("web_open_url", notAvailable(func(args map[string]json.RawMessage) error {
-				var in openArgs
-				if err := decode(args, &in); err != nil {
-					return err
-				}
-				if err := checkURL(in.URL); err != nil {
-					return err
-				}
-				return checkOffset(in.Offset)
-			}))},
+			Call:        a.wrap("web_open_url", a.open)},
 	}
 }
 

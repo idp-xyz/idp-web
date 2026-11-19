@@ -173,6 +173,15 @@ func New(cfg Config) *Reader {
 	return r
 }
 
+type allowKey struct{}
+
+// WithAllow returns a context whose Read also calls allow with the host of the first address and of every redirect,
+// after Config.Allow and before anything is sent there. The Reader is shared by every tenant, so a rule that belongs
+// to one call (the tenant's domain lists, ADR-0001 D18) travels with the call and not in the Config.
+func WithAllow(ctx context.Context, allow func(host string) error) context.Context {
+	return context.WithValue(ctx, allowKey{}, allow)
+}
+
 // Read fetches rawURL and returns its main text.
 func (r *Reader) Read(ctx context.Context, rawURL string) (Page, error) {
 	parent := ctx
@@ -206,6 +215,11 @@ func (r *Reader) read(ctx context.Context, rawURL string) (Page, error) {
 	resp, final, err := r.follow(ctx, rawURL, func(ctx context.Context, hop int, t addr.Address) error {
 		if r.cfg.Allow != nil {
 			if err := r.cfg.Allow(t.Host); err != nil {
+				return err
+			}
+		}
+		if allow, _ := ctx.Value(allowKey{}).(func(string) error); allow != nil {
+			if err := allow(t.Host); err != nil {
 				return err
 			}
 		}

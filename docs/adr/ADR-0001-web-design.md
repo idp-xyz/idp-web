@@ -1,9 +1,9 @@
-# ADR-0001　idp-web 的设计（骨架阶段）
+# ADR-0001　idp-web 的设计（骨架、读取、工具）
 
 | 项 | 内容 |
 |---|---|
-| 状态 | 已接受（2026-11-19，随任务 W1；平台 ADR-0003 附录 C 的阶段 1 计划） |
-| 范围 | `idp-web` 的技术栈、调用者校验、工具声明、正文提取的接口与规则、地址规则与读取（D6 到 D15，任务 W3）。搜索适配器、`ref`、租户配置各由后续任务写入本 ADR |
+| 状态 | 已接受（2026-11-19，随任务 W1；平台 ADR-0003 附录 C 的阶段 1 计划）；D16 到 D25 随任务 W4 |
+| 范围 | `idp-web` 的技术栈、调用者校验、工具声明、正文提取的接口与规则、地址规则与读取（D6 到 D15，任务 W3）。`ref`、搜索适配器、租户配置、编号、缓存、限流、审计、错误句子（D16 到 D25，任务 W4） |
 | 依据 | 平台 ADR-0003（网页搜索与读取）D1、D2；idp-sandbox ADR-0001 D10、D18；idp-mcp ADR-0001 D40、D44；平台 ADR-0003 D4、7.3（T3、T7）、13.1；idp-sandbox ADR-0001 D22；RFC 9309；MCP 2026-07-28 |
 
 ## 1. 背景与边界
@@ -18,8 +18,8 @@
 |---|---|---|
 | D1 | **照 idp-sandbox 的方式搭：Go，MCP 手写，骨架阶段只用标准库；MCP 层从沙箱复制，不共享代码** | 沙箱 D10 已做过同样的选择：协议准入规则是 idp-mcp 网关的规则，两边各复制一份，比引入一个共享模块（要版本、要发布、要三个仓库同时升级）简单。复制会漂移，所以把漂移变成测试失败：`internal/mcp` 带着沙箱的同一组断言向量，由 idp-mcp 的签名器在固定时刻为固定请求签出，同一个请求和摘要也钉在 idp-mcp 的 `TestRequestDigestIsTheOneUpstreamsCompute` 里；哪一边改了规范化或校验规则，这条测试就会失败。向量里的受众（`http://sandbox:8570/mcp`）和工具名（`sandbox_run`）是被签名的内容，所以原样保留，不改成 web。后续任务的第三方依赖（HTML 解析、正文提取）在各自的决策里写明理由，CI 跑 govulncheck |
 | D2 | **调用者只取自网关签名的断言** | 设了 `IDP_WEB_CALLER_KEYS_FILE` 与 `IDP_WEB_CALLER_AUDIENCE` 之后，每个 `tools/call` 必须带 `_meta["io.idp.telos/caller-assertion"]`：ES256、`typ` 为 `idp-caller+jwt`、`kid` 是持有的公钥、签名验得过、`aud` 是本服务、没过期（允许 30 秒时钟差，有效期超过 5 分钟的不收）、不是未来签的、`req` 等于这次请求的摘要（参数与签名时不同即拒绝）、`jti` 只收一次；公钥必须是 P-256。没有断言得到 HTTP 403，工具不会运行；`tools/list` 与 `server/discover` 不需要调用者（网关的漂移检查没有）。租户和成员只来自校验过的调用者，不是工具参数：`ref` 要绑定调用者（ADR-0003 4.3），没有这一条它就没有意义。公钥与受众只设一个，启动即退出（状态码 2）。`IDP_WEB_REQUIRE_CALLER` 缺省为真。每一种拒绝在 `internal/mcp` 里是一个有名字的反例，并有一个正例在先，证明拒绝出于预期的原因 |
-| D3 | **三个工具的参数与标注先定下来，处理程序以后再换** | 网关在评审时钉住每个工具的 `inputSchema` 与标注，之后的任何变化都要重新评审（idp-mcp 的漂移封锁）。先把最终声明定下并放进测试，后面的任务只换处理程序，不会因改参数而反复评审。`web_search {query, freshness?, count?}`（`count` 为 1 到 10，`freshness` 取 `day`、`week`、`month`、`year`）；`web_fetch {url, ref, offset?}`；`web_open_url {url, offset?}`；都是 `additionalProperties: false`，标注都是 `readOnlyHint: true`、`openWorldHint: true`。参数严格解码，未知字段是错误。当前每个处理程序在校验参数之后返回固定的错误句子"web search is not available yet"（`isError: true`）；错误句子是哨兵错误到消息的映射，其他错误只进日志，模型得到的是固定的一句 |
-| D4 | **审计只记元数据，调用者记短哈希** | 每次调用一行日志：工具、结果、耗时、调用者（租户与成员的 SHA-256 前 4 字节）。不记成员标识本身，不记参数内容。查询词和地址的审计字段由后续任务按 ADR-0003 4.7 加入 |
+| D3 | **三个工具的参数与标注先定下来，处理程序以后再换** | 网关在评审时钉住每个工具的 `inputSchema` 与标注，之后的任何变化都要重新评审（idp-mcp 的漂移封锁）。先把最终声明定下并放进测试，后面的任务只换处理程序，不会因改参数而反复评审。`web_search {query, freshness?, count?}`（`count` 为 1 到 10，`freshness` 取 `day`、`week`、`month`、`year`）；`web_fetch {url, ref, offset?}`；`web_open_url {url, offset?}`；都是 `additionalProperties: false`，标注都是 `readOnlyHint: true`、`openWorldHint: true`。参数严格解码，未知字段是错误。骨架阶段每个处理程序在校验参数之后返回固定的错误句子"web search is not available yet"，W4 换成真正的处理程序（D16 到 D24），声明的摘要由 `TestTheDeclaredSchemasAreTheOnesTheGatewayPinned` 钉住；错误句子是哨兵错误到消息的映射，其他错误只进日志，模型得到的是固定的一句 |
+| D4 | **审计只记元数据，调用者记短哈希** | 每次调用一行日志：工具、结果、耗时、调用者（租户与成员的 SHA-256 前 4 字节）。不记成员标识本身，不记参数内容。查询词和地址的审计字段由 D23 加入（W4） |
 | D5 | **正文提取：接口、纯文本读取器、回退规则、转 Markdown、隐藏内容规则已定；引擎用 readability（3.7，已由新页面集确认）** | 见下面 3.1 到 3.7。`internal/extract` 里有两个引擎：`readability`（缺省）和 `plain`。选择在 51 页真实网页和合成 E4 上量出来（平台 ADR-0003 附录 C 4.6、第 3 节的判据），再由另采的 30 页确认；落选的 go-trafilatura 和它的依赖已从代码里删除（它的实现在提交 7e094bb 里） |
 | D6 | **哪些地址算公网：IANA 特殊用途登记表里"不可全球路由"的一律拒绝，不在表里的保留空间和带区的地址也拒绝** | 表写成 `internal/addr` 里的一张数据表，注明登记表与日期（2026-11-19），从 idp-sandbox 出口代理的表改写而来（两个仓库不共享代码，改一处要手工改另一处）：IPv4 的 14 块、IPv6 的 11 块，含 NAT64、6to4、Teredo 整块拒绝（它们能到达里面嵌的 IPv4 地址）；IPv4 映射的 IPv6 地址按它携带的 IPv4 地址判断；任何带区的地址一律拒绝（`netip.Prefix.Contains` 对带区地址恒为假，只查表会放行）。比沙箱多一条：2000::/3 之外的 IPv6 空间（登记表没有逐条列出的未分配空间）也拒绝，因为没有网站会在那里。相对 Python 参照 `is_global` 因此更严，差异只在这一段。测试：`TestEveryBlockOfTheRegistryTableIsNotPublicAtItsFirstMiddleAndLastAddress`（用表本身生成每块的首、中、尾地址）、`TestAddressesThatAreNotPublicAreNotPublic`、`TestEveryZonedAddressIsNotPublic`、`TestPublicAddressesNextToTheSpecialPurposeBlocksStayPublic`（相邻的公网地址仍放行，防止过严）、`TestEmbeddedIPv4ShowsWhatATranslatedAddressWouldReach` |
 | D7 | **一个解析器，一次解析：`addr.Target` 返回之后的每一步只用它给的协议、主机、端口** | 两个解析器对同一段文字的理解不同，是 SSRF 的常见来源。`Target` 用 `net/url` 解析一次，拒绝：http 和 https 以外的协议、无 `//` 的地址、带用户名密码的地址（包括空的）、80 和 443 以外的端口、空主机、IDNA 转换失败的主机；国际化域名先转成 ASCII 形式；十进制、十六进制、八进制、短写的 IP（`2130706433`、`0x7f.1`、`0177.0.0.1`、`127.1`，判据是最后一个标签是数字，与 WHATWG 的 IPv4 判断相同）一律拒绝，因为 Go 自己的解析器把它们当域名，C 库和浏览器当 127.0.0.1；全角数字和句号经 IDNA 映射成的 IP 同样拒绝。**规范写法的 IP 字面量：公网的放行，非公网的在这里就拒绝**（不等连接）；IPv6 字面量必须是规范写法且不带区。请求的地址由 `Address.URL()` 从这几个部分重建，不再用原文，所以检查过的与请求的是同一个。测试：`TestAddressesAreRefusedForTheReasonTheyAreWrong`、`TestTheTwentyAddressesOfTheSSRFListAreRefused`（评测的 20 个）、`TestAddressesThatMayBeReadAreParsedOnceIntoTheirParts`、`TestTheParsedAddressRoundTripsThroughItsOwnURL`、模糊测试 `FuzzTarget`（不崩溃；接受的地址协议为 http/https、端口 80/443、无用户信息、主机是名字或公网规范 IP；60 秒结果见任务报告） |
@@ -31,6 +31,16 @@
 | D13 | **TLS 根证书：用 `golang.org/x/crypto/x509roots/fallback`，在 `cmd/idp-web` 里为副作用导入** | 镜像是 `FROM scratch`，没有 CA 证书，HTTPS 会失败。两条路里选这一条：不用往镜像里复制文件（`deploy/build.sh` 不依赖主机的证书目录，镜像仍只有一个文件），根证书随 Go 模块版本固定，进入 `go.sum` 和 govulncheck 的视野，构建仍可离线重现；系统有根证书时 Go 优先用系统的，所以在有证书的环境里行为不变。更新方式：`go get golang.org/x/crypto/x509roots/fallback@latest`，重建镜像；包是从 Mozilla NSS 根存储生成的，当前版本 v0.0.0-20261115193255-739070949446（2026-11-15），许可证 BSD-3-Clause（Go 作者；证书数据来自 NSS）。跟不上 NSS 的撤销是这条路的代价，所以要随依赖更新（CI 已跑 govulncheck，另应按月更新）。证明：不是单元测试，而是在镜像里跑 `idp-web -check-tls https://example.org/`（任务报告里有输出，过期证书的站点被拒绝）；`TestTLSVerifiesTheHostNameAndTheChain` 另证主机名与证书链是被验证的 |
 | D14 | **测试用例外：`IDP_WEB_TEST_ORIGINS` 只豁免列出的 `主机:端口`，其余一概不豁免** | 逗号分隔的精确 `主机:端口`，在 `cmd/idp-web` 解析（通配符、缺端口、空主机、带区的地址都是错误：松散的条目豁免得比本意多），传给读取器。只豁免端口规则与公网规则；用户名密码、协议、非规范写法仍然拒绝；同一主机的另一个端口、同一端口的另一个主机、重定向到别处都不豁免。服务启动时若设了它，日志警告。**还没做：** 计划说"清单测试断言发布的清单里没有它"；本仓库没有部署清单，这条断言属于 compose 与 kind 部署的任务。测试：`TestATestOriginIsExemptAndNothingElseIs`、`TestTestOriginsExemptExactlyTheListedHostAndPortAndNothingElse`、`TestTestOriginsAreParsedIntoTheFormTheReaderComparesWith`、`TestATestOriginThatCouldExemptMoreThanWasMeantIsAnError` |
 | D15 | **错误是模型能据以行动的小写句子，内部细节只进日志** | `ErrNotPublic`（`addr.ErrNotPublic`，字面量与解析结果同一个）、`ErrRobots`、`ErrTooLarge`、`ErrTooSlow`、`ErrType`、`ErrPDF`、`ErrEncoding`、`ErrBotCheck`、`ErrStatus`（附状态码）、`ErrTooManyRedirects`、`ErrConnect`、`ErrUnreadable`，加 `addr.ErrRefused`（地址形式，附原因）；用 `errors.Is` 判断。连接错误、解析出的地址、传输层的原文不进错误，只进日志。调用者取消时返回 `context.Canceled`，不当作超时。测试：各条错误对应的测试同上；`TestTheCallersCancellationIsReturnedAsItIs`、`TestAConnectionThatCannotBeMadeIsReportedWithoutItsInternals` |
+| D16 | **`ref`：25 个字符，HMAC-SHA-256 对（地址、调用者、过期时间），三部分用带长度的编码拼接** | 形式与阶段 0 测过的相同：`<过期时间，8 位十六进制>.<MAC 的 16 个 base32 小写字符>`（80 位）。拼接：固定标签 `idp-web ref v1\0`，然后地址、调用者各带 4 字节大端长度，最后过期时间 4 字节大端，所以两个不同的三元组不会得到同一串字节（参照实现 `refs.py` 用 NUL 分隔，地址里有 NUL 时两个不同的三元组会撞；因此本实现的 `ref` 与 `refs.py` 的**不互通**，评测框架不拿它验证生产的 `ref`）。调用者是已验证调用者的 `租户/主体`，有效期 1 小时。密钥来自 `IDP_WEB_REF_KEY_FILE`：一行一把、每把至少 32 字节、第一把签发、全部验证（轮换：新密钥放前面，一小时后去掉旧的）。MAC 用常量时间比较（`subtle.ConstantTimeCompare`，所有密钥都比一遍）。`Check` 先验 MAC 再看过期：伪造的 `ref` 得不到"已过期"这类信息，只有本来真实的 `ref` 才会被报告过期。三个原因各是一个哨兵错误：不是 `ref`（`ErrMalformed`）、不是为这个地址和调用者做的（`ErrNotForIt`）、已过期（`ErrExpired`），模型读到的句子见 D24。web_fetch 要求地址与列出的写法逐字相同（列出的是规范化后的写法，D20）：多一个查询串就是另一个地址。每个控制的测试见第 5 节 |
+| D17 | **搜索适配器：`Provider.Search(ctx, Query)`；发给服务商的只有 `Query` 的字段，没有调用者的任何标识** | `Query{Text, Freshness, Count, IncludeDomains, ExcludeDomains}`。`exa`：`POST {base}/search`，`x-api-key`，`type`（`IDP_WEB_EXA_TYPE`，`auto` 缺省或 `lite`）、`numResults`、`contents:{highlights:true}`、由 `freshness` 算出的 `startPublishedDate`、包含与排除域名；基址 `IDP_WEB_EXA_BASE_URL`（缺省 `https://api.exa.ai`，欧盟 `https://api.eu.exa.ai`，必须是 https，因为 API 密钥会发到那里）。`brave`：`GET …/res/v1/web/search?q&count&extra_snippets=true[&freshness=pd|pw|pm|py]`，`X-Subscription-Token`；Brave 没有域名参数，名单写进查询词（`-site:` 每个排除域名一个；包含域名只有一个时写 `site:`，有几个时不写：参照实现只取第一个，会把其余的域名挡在结果外，不写则由 D20 的检查筛掉不在名单里的结果，代价是结果可能变少）。`fixture`：`IDP_WEB_FIXTURE_FILE`，YAML：`entries: [{match, results: [{url, title, published, snippet}]}]` 与可选的 `default`；`match` 是查询词的子串（不分大小写，先匹配的先用）；不联网、忽略域名名单与新鲜度（像一个过滤不生效的服务商，使名单的强制必须由调用方做到，D20）。服务商的 HTTP 客户端与页面读取器**分开**：API 主机是固定的可信目的地，所以走环境里的代理变量（启动时读一次，规则同 `http.ProxyFromEnvironment`；读取器则忽略代理，D8）；自己的 10 秒超时；应答最多 4 MiB（读完再看，使限制是限制，不取决于 JSON 解码器读到哪里）；只跟随同主机、同协议的重定向，不跟随到另一个主机（密钥是请求头）。服务商返回的标题和摘录压成一行并截断（含换行的标题可以写出一行像结果列表自己的 `ref:` 或 `[9]`）。服务商的错误详情（状态、应答正文、网络错误）写日志，模型只读到固定的一句（`ErrUnavailable`、`ErrBusy`，D24） |
+| D18 | **租户文件：`IDP_WEB_TENANTS_FILE`，启动时读一次；租户只取自已验证的调用者** | `default` 与 `tenants: {<租户号>: {enabled, includeDomains, excludeDomains, openUrl}}`；未知的键是错误（拼错的 `excludeDomain` 不能悄悄让一个域名可读）；没有列出的租户用 `default`，没有 `default` 时一律不可用；`openUrl` 缺省为关。域名项匹配该名字本身与它的子域名，不匹配 `notexample.com` 这样的近似名；含协议、路径、端口、通配符的项是错误（不猜）；国际化名字按 ASCII（punycode）形式比较。排除优先于包含；包含名单为空表示所有域名。名单在两处强制，不依赖服务商（有报告称某些服务商的屏蔽名单有时不生效，平台 ADR-0003 D6）：搜索结果在给出 `ref` 之前（D20），读取时第一个地址与每一次重定向（D20）。`Policy.AllowHost` 是唯一的判断 |
+| D19 | **编号：`n` 在一个调用者名下标识一个来源，所以一次运行里几次搜索之后回答中的 `[n]` 不会有歧义** | 内存里按调用者保存"地址 → 第一次给出的号"，新地址取下一个空号；号不重用（一个号从不指向两个地址）。一小时没用就忘掉；调用者数（1 万）与每个调用者的地址数（1000）有上限，超了先丢最久没用的地址或调用者。读取页面给出的引用用同一张表，所以 `web_fetch` 的 `citations[0].n` 与搜索里列出它的那一项相同。**这是按副本的**：阶段 1 只跑一个副本；多副本或重启后编号会分叉，阶段 2 把编号移到 HOST 的 `sources`（平台 ADR-0003 D9）。限制：编号表忘掉某个地址后再见到它会得到新号，模型上下文里旧号仍指向同一地址，所以仍然无歧义 |
+| D20 | **工具的流程与结果格式** | `web_search`：校验参数 → 租户已启用 → 限流 → 服务商 → 每条结果过 `addr.TargetWith`（含测试例外）与租户名单，不过的丢掉并在审计行里计数，**不带 `ref` 的结果从不返回**；地址写成规范形式（小写主机、去片段与默认端口），重复的只留一条；每条是 `[n] 标题` / `address:` / `ref:` / `published:` / `excerpt:`（与 `tools/web_eval/agent.py` 相同，条与条之间空一行，没有结果写 `no results`）；`structuredContent.citations = [{n, title, url}]`。`web_fetch`：参数 → 租户已启用 → **`ref` 校验（T1、T2：不是搜索给出的地址就读不了）** → 地址规则与租户名单（第一个地址）→ 缓存 → 限流 → `Reader.Read` → `extract.Page`（12 KiB 一段）；首行 `[n] 标题 (bytes a–b of 总长; the rest: web_fetch with offset N)`，与参照实现相同（`web_open_url` 里写 `web_open_url`）；段内没有文字写 `(no text found on this page)`；`citations = [{n, title, url（最终地址）, fetchedAt, sha256（这一段文字的）}]`。`web_open_url`：只在租户 `openUrl: true` 时可用，不要 `ref`，其余同上；关闭时的句子写明管理员要在租户文件里改什么。每个重定向的域名检查走 `fetch.WithAllow`：读取器是所有租户共用的一个，`Config.Allow` 在构造时固定，租户的规则属于这一次调用，所以放在调用的 context 里（对 `internal/fetch` 的唯一改动，`TestAnAllowRuleOfTheCallSeesEveryAddressAndCanRefuseARedirect`）；第一个地址在读取器之前也检查一次，这样被拒的读取不占读取配额（`TestARefusedReadDoesNotUseTheReadQuota`）。与参照实现的差别：错误不加 `error:` 前缀（`isError: true` 已经表示），也不加 `<<untrusted web content>>` 的外壳（那是 HOST 的 `wrap`，平台 ADR-0003 D8）；标题为空时用地址 |
+| D21 | **读取缓存：按租户、以请求的地址为键、一小时、有条数与字节上限；搜索结果不缓存** | 为了后一段（`offset`）不再请求源站。缺省 256 页、64 MiB（解码后的文字），最久没用的先丢；比整个缓存还大的页面不缓存。租户之间不共享（一个租户读过的页面不会给另一个租户）。缓存里的页面带原来的读取时间，`fetchedAt` 就是它。搜索结果从不进缓存（服务商条款通常限制存储）。命中缓存也要先过 `ref` 与名单检查 |
+| D22 | **限流：按调用者的滑动窗口，内存里，按副本** | 缺省 10 分钟 30 次搜索、30 次读取，`IDP_WEB_LIMIT_SEARCHES`、`IDP_WEB_LIMIT_READS`、`IDP_WEB_LIMIT_WINDOW_S`。读取只数真正发往网站的（缓存命中的后几段不数，被规则拒绝的也不数）；超限的调用不记入，告诉模型多少秒后可再试，并让它用已有的内容回答。每次运行的上限做不到（调用者断言里没有运行号，附录 C 第 2 节第 4 条），HOST 的步数限制兜底；已知差距。窗口表有大小上限 |
+| D23 | **审计：每次调用一行 JSON（`msg":"audit"`）** | 字段：时间、`tool`、`outcome`、`ms`、`tenant`、`caller`（租户与主体的 SHA-256 前 4 字节）、`query`（明文：它就是外发的内容）、`url`（明文，包括被拒绝的：模型写了什么地址正是要看的）、`results`、`dropped`、`bytes`（交给模型的）、`cache`、`decision`（`allowed`、`refused`、`failed`）、`reason`（`ok` 或 D24 的原因名）。**没有 `ref`、密钥、主体本身和页面文字。**留存期是部署的日志策略，不在本服务里。`TestTheAuditLineHasTheQueryAndTheAddressAndNeitherTheRefNorAKeyNorPageText` |
+| D24 | **错误句子、指标、就绪与配置** | 每个哨兵（`fetch`、`addr`、`refs`、`tenants`、`search` 与本包的）在 `internal/tools/errors.go` 的 `mappings` 里有一行：原因名、决定（`refused` 规则拒绝；`failed` 网站或服务商没给出）与模型读到的句子；其中 `ref` 的句子是"那个地址不是搜索结果里的：先搜索，再原样使用列出的地址与 ref"。不在表里的错误：详情写日志（`tool failed`），模型读到"the web tool failed to complete the request"。`TestEverySentinelHasAFixedSentence` 列出所有哨兵，加了哨兵而没加这一行就失败。指标新增 `idp_web_refused_total{tool,reason}`（被规则拒绝的调用，按原因）。`IDP_WEB_PROVIDER`（`fixture`、`exa`、`brave`）必须设置，它的密钥或文件缺失，`IDP_WEB_REF_KEY_FILE`、`IDP_WEB_TENANTS_FILE` 缺失或无效，都是配置错误，退出码 2。`/readyz` 只有在服务商、`ref` 密钥与租户文件都已载入时才是 200，否则 503 并写明缺什么。密钥一律来自文件，不来自环境变量 |
+| D25 | **新增依赖：`gopkg.in/yaml.v3` v3.0.1（许可证 MIT 与 Apache-2.0；它的 libyaml 移植部分是 MIT，其余是 Apache-2.0）** | 租户文件与 fixture 文件是 YAML（平台 ADR-0003 附录 C 4.7），标准库没有 YAML。idp-sandbox 已用同一版本。只用 `Decoder` 与 `KnownFields(true)`。除它之外没有新增依赖；`golang.org/x/net/http/httpproxy` 与 `idna` 属于已有的 `golang.org/x/net`。`govulncheck ./...` 无漏洞 |
 
 ## 3. D5 的细节（任务 W2）
 
@@ -141,6 +151,63 @@ D6 到 D15 的每条控制，各去掉一次、看测试失败、再恢复（脚
 
 D13 的根证书本身不是单元测试能证明的：见任务报告里在镜像中的 `-check-tls`。
 
-## 5. 其余
+## 5. 反向验证（任务 W4）
 
-搜索、`ref`、租户配置：见平台 ADR-0003 与它的附录 C，由后续任务写入本 ADR。地址检查、读取、提取见 D5 到 D15。
+每个控制手工去掉一次，只跑相关的包，记下哪些测试失败，再恢复。下表是这样得到的（脚本只是把这一过程自动化，改动在每次运行后还原）。
+
+| 控制 | 去掉什么 | 失败的测试 |
+|---|---|---|
+| D16 `web_fetch` 校验 `ref`（T1、T2） | 不调用 `Keys.Check` | `TestAnAddressThatWasNotInASearchResultIsRefusedWithAnyRefAndWithNone`、`TestAnAlteredRefAnotherAddressesRefAnotherCallersRefAndAnExpiredRefAreRefused`、审计行测试 |
+| D16 `ref` 绑定调用者 | MAC 里不含调用者 | `TestARefMadeForAnotherAddressOrAnotherCallerIsRefused`、`TestAnAlteredRef…` |
+| D16 `ref` 绑定地址 | MAC 里不含地址 | `TestARefMadeForAnotherAddressOrAnotherCallerIsRefused`、`TestAnAddressThatWasNotInASearchResultIsRefused…`、`TestAnAlteredRef…` |
+| D16 过期 | 不检查过期 | `TestAnExpiredRefIsRefusedAsExpired…`、`TestAnAlteredRef…` |
+| D16 无歧义拼接 | 去掉长度前缀 | `TestThePartsAreJoinedWithoutAmbiguity` |
+| D16 轮换 | 只用第一把密钥验证 | `TestAfterARotationTheOldKeysStillVerifyAndOnlyTheFirstSigns` |
+| D16 密钥长度 | 接受短密钥 | `TestKeysShorterThan32BytesAreRefused`、`TestKeysAreReadOneALineFromAFile`、`TestAShortRefKeyAndABadTenantsFileAreRefusedByTheirContent` |
+| D16 常量时间比较 | （没有去掉：时间差不是单元测试能稳定断言的；代码用 `subtle.ConstantTimeCompare`，由评审读代码确认） | 无 |
+| D18 租户未启用（fetch） | web_fetch 不查 `enabled` | `TestATenantThatIsNotEnabledGetsNothing` |
+| D18 租户未启用（search） | web_search 不查 `enabled` | `TestATenantThatIsNotEnabledGetsNothing` |
+| D18 重定向的域名检查 | 读取时不带租户的规则 | `TestAnExcludedDomainIsRefusedOnFetchAndOnARedirectToIt` |
+| D18 读取器支持调用级规则 | `WithAllow` 被读取器忽略 | `TestAnAllowRuleOfTheCallSeesEveryAddressAndCanRefuseARedirect`、`TestAnExcludedDomainIsRefused…` |
+| D20 第一个地址在读取之前的检查 | 去掉预检（读取器仍会拒绝，但已占了配额） | `TestARefusedReadDoesNotUseTheReadQuota` |
+| D20 结果按租户名单过滤 | 不过名单 | `TestResultsThatFailTheAddressRulesOrTheTenantsListsAreDroppedAndCounted` 等 4 个 |
+| D20 结果过地址规则 | 不过 `addr.TargetWith` | 10 个端到端测试（私网与畸形地址进了结果） |
+| D18 `web_open_url` 开关 | 不查 `openUrl` | `TestWebOpenURLIsRefusedUnlessTheTenantAllowsItAndThenNeedsNoRef` |
+| D18 未知键 | `KnownFields(false)` | `TestAKeyTheFileDoesNotKnowIsAnErrorAndSoIsADomainThatIsNotAName` |
+| D18 排除优先 | 包含优先于排除 | `TestExcludeWinsOverIncludeAndAnEmptyIncludeListMeansEveryDomain`、`TestADomainEntryCovers…` |
+| D18 域名匹配 | 按文字后缀匹配（`notexample.com`） | `TestADomainEntryCoversTheNameAndItsSubdomainsButNotALookalike` |
+| D18 未列出的租户 | 返回启用的策略 | `TestATenantNotNamedGetsTheDefault…`、`TestATenantThatIsNotEnabledGetsNothing` |
+| D18 `openUrl` 缺省 | 缺省为开 | `TestOpenURLIsOffUnlessTheFileTurnsItOn`、`TestWebOpenURLIsRefused…` |
+| D19 同一地址同一个号 | 每次都给新号 | `TestTheSameAddressKeepsItsNumberAcrossSearchesAndANewOneGetsTheNext` 等 3 个 |
+| D19 按调用者编号 | 所有调用者共用一张表 | `TestTheSameAddressKeepsItsNumberAcrossSearchesAndANewOneGetsTheNext` |
+| D21 缓存 | 读完不放进缓存 | `TestOffsetContinuesALongPageFromTheCacheWithoutAnotherRequestToTheOrigin`、限流测试 |
+| D21 按租户隔离 | 键里不含租户 | `TestOffsetContinuesALongPage…`、`TestThePageCacheIsBounded…` |
+| D21 一小时 | 不过期 | `TestOffsetContinuesALongPage…`、`TestThePageCacheIsBounded…` |
+| D21 条数上限 | 只限字节 | `TestThePageCacheIsBoundedInEntriesAndBytesAndDropsTheLeastRecentlyUsed` |
+| D22 搜索限流 | 不检查 | `TestTheRateLimitIsPerCallerAndTellsTheModelWhenToTryAgain` |
+| D22 读取限流 | 不检查 | 同上 |
+| D22 按调用者 | 所有调用者共用一个计数 | 同上 |
+| D22 滑动 | 调用记录不过期 | 同上、`TestTheLimiterSlidesAndRefusesTheCallerOverTheLimitWithoutCountingTheRefusal` |
+| D23 审计里没有 `ref` | 把 `ref` 写进 `url` 字段 | `TestTheAuditLineHasTheQueryAndTheAddressAndNeitherTheRefNorAKeyNorPageText` |
+| D23 审计里有查询词 | 不写查询词 | 同上 |
+| D23 审计里没有主体 | 写主体而非短哈希 | 同上 |
+| D17 请求里没有标识（Exa） | 请求头加 `X-Request-Id` | `TestTheExaRequestCarriesTheDocumentedFieldsAndNothingElse` |
+| D17 请求里没有标识（Brave） | `User-Agent` 写进租户 | `TestTheBraveRequestCarriesTheDocumentedFieldsAndNothingElse` |
+| D17 查询词里没有标识 | 查询词后面拼上租户号 | `TestWhatTheProviderIsSentHasTheQueryAndTheTenantsDomainListsButNotWhoAsked` |
+| D17 服务商错误不外泄 | 401 时把应答正文放进错误 | `TestAProviderErrorGivesAFixedSentenceAndTheDetailGoesToTheLog` |
+| D17 标题压成一行 | 不压 | `TestATitleOrExcerptCannotWriteALineOfTheResultList` 等 3 个 |
+| D17 应答大小 | 去掉 4 MiB 限制 | `TestAnAnswerLargerThanTheLimitIsRefusedEvenWhenItsJSONIsComplete` |
+| D17 不跟随到另一个主机 | 不设 `CheckRedirect` | `TestAProviderRedirectToAnotherHostIsNotFollowed` |
+| D17 代理 | 不用环境里的代理 | `TestTheProviderClientUsesTheProxyOfTheEnvironment` |
+| D17 超时 | 去掉客户端超时 | `TestTheProviderClientHasItsOwnTimeout` |
+| D24 每个哨兵有句子 | 去掉 `ErrExpired` 或 `fetch.ErrRobots` 的一行 | `TestEverySentinelHasAFixedSentence`（前者另有 `TestAnAlteredRef…`） |
+| D24 拒绝按原因计数 | 不调用 `Refused` | `TestAnAlteredRef…`、`TestTheRateLimitIs…`、`TestWebOpenURLIsRefused…` |
+| D24 必须设服务商 | 缺省为 fixture | `TestEachMissingOrInvalidSettingIsAConfigurationError` |
+| D24 `/readyz` | 总是就绪 | `TestReadyzIsNotReadyUntilTheProviderTheRefKeyAndTheTenantsAreLoaded` |
+| D24 Exa 基址必须是 https | 接受 http | `TestEachMissingOrInvalidSettingIsAConfigurationError` |
+
+没有单独失败的一处是有意的：D16 的常量时间比较（见上）。
+
+## 6. 其余
+
+搜索、`ref`、租户配置、编号、缓存、限流、审计见 D16 到 D25；地址检查、读取、提取见 D5 到 D15。已知差距：每次运行的调用上限（D22）与编号的跨副本一致（D19）；`ref` 的常量时间比较没有测试。

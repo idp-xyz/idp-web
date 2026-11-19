@@ -14,14 +14,31 @@
 //	                          Set both or neither. Neither: the forwarded caller is taken as it arrives, and only the
 //	                          private network vouches for it
 //
+//	IDP_WEB_PROVIDER          the search service: fixture, exa or brave. Required
+//	IDP_WEB_EXA_KEY_FILE      exa: file holding the API key (required for exa)
+//	IDP_WEB_EXA_BASE_URL      exa: the API's address, https only (default https://api.exa.ai; the EU endpoint is
+//	                          https://api.eu.exa.ai)
+//	IDP_WEB_EXA_TYPE          exa: auto (default) or lite
+//	IDP_WEB_BRAVE_KEY_FILE    brave: file holding the API key (required for brave)
+//	IDP_WEB_FIXTURE_FILE      fixture: the YAML file of query matches and results, for development and acceptance
+//	                          (no network, no key)
+//	IDP_WEB_REF_KEY_FILE      the keys that sign and verify refs, one a line, each at least 32 bytes: the first signs,
+//	                          all verify, so a key is rotated by adding the new one in front. Required
+//	IDP_WEB_TENANTS_FILE      the YAML file that says which tenants may use the tools, with which domain lists, and
+//	                          whether web_open_url is on. Read once at start. Required
+//	IDP_WEB_LIMIT_SEARCHES    searches a caller may make in the window (default 30)
+//	IDP_WEB_LIMIT_READS       page reads that go out to the web a caller may make in the window (default 30)
+//	IDP_WEB_LIMIT_WINDOW_S    the window in seconds (default 600)
+//
 //	IDP_WEB_TEST_ORIGINS      for tests only: comma-separated host:port pairs the reader may contact although they are
 //	                          not public addresses or not on port 80 or 443 (ADR-0001 D14). Nothing else is exempted
 //
 // `idp-web -check-tls https://host/` reads one page through the reader and exits; it shows that TLS verifies from
 // inside the image, which has no CA certificates of its own (ADR-0001 D13).
 //
-// A configuration error is written to stderr and the exit status is 2. The settings for the search service, the
-// reference key, the tenants and the reader come with the tasks that need them (platform ADR-0003 appendix C, 4.8).
+// Keys are read from files, never from the environment. A configuration error, including a missing provider, key file
+// or tenants file, is written to stderr and the exit status is 2 (platform ADR-0003 appendix C, 4.8). /readyz answers
+// 200 only when the provider, the ref key and the tenants file are loaded.
 package main
 
 import (
@@ -34,6 +51,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -62,15 +80,23 @@ func fatal(args ...any) {
 }
 
 type metrics struct {
-	mu     sync.Mutex
-	counts map[[2]string]int64
-	nanos  map[string]int64
+	mu      sync.Mutex
+	counts  map[[2]string]int64
+	nanos   map[string]int64
+	refused map[[2]string]int64
 }
 
 func (m *metrics) Observe(tool, outcome string, d time.Duration) {
 	m.mu.Lock()
 	m.counts[[2]string{tool, outcome}]++
 	m.nanos[tool] += d.Nanoseconds()
+	m.mu.Unlock()
+}
+
+// Refused counts a call that a rule refused, by tool and reason (ADR-0001 D24).
+func (m *metrics) Refused(tool, reason string) {
+	m.mu.Lock()
+	m.refused[[2]string{tool, reason}]++
 	m.mu.Unlock()
 }
 
@@ -93,6 +119,20 @@ func (m *metrics) write(w http.ResponseWriter) {
 	for _, k := range keys {
 		fmt.Fprintf(w, "idp_web_calls_total{tool=%q,outcome=%q} %d\n", k[0], k[1], m.counts[k])
 	}
+	fmt.Fprintln(w, "# TYPE idp_web_refused_total counter")
+	rk := make([][2]string, 0, len(m.refused))
+	for k := range m.refused {
+		rk = append(rk, k)
+	}
+	sort.Slice(rk, func(i, j int) bool {
+		if rk[i][0] != rk[j][0] {
+			return rk[i][0] < rk[j][0]
+		}
+		return rk[i][1] < rk[j][1]
+	})
+	for _, k := range rk {
+		fmt.Fprintf(w, "idp_web_refused_total{tool=%q,reason=%q} %d\n", k[0], k[1], m.refused[k])
+	}
 	fmt.Fprintln(w, "# TYPE idp_web_call_seconds_total counter")
 	tn := make([]string, 0, len(m.nanos))
 	for k := range m.nanos {
@@ -102,6 +142,16 @@ func (m *metrics) write(w http.ResponseWriter) {
 	for _, k := range tn {
 		fmt.Fprintf(w, "idp_web_call_seconds_total{tool=%q} %g\n", k, float64(m.nanos[k])/1e9)
 	}
+}
+
+// readyz answers 200 only when the search provider, the ref key and the tenants file are loaded; otherwise 503 and
+// what is missing.
+func readyz(w http.ResponseWriter, s *setup) {
+	if m := s.missing(); len(m) > 0 {
+		http.Error(w, "not ready: "+strings.Join(m, ", ")+" not loaded", http.StatusServiceUnavailable)
+		return
+	}
+	fmt.Fprintln(w, "ready")
 }
 
 func main() {
@@ -131,10 +181,16 @@ func main() {
 		fatal("invalid IDP_WEB_METRICS:", err)
 	}
 
-	met := &metrics{counts: map[[2]string]int64{}, nanos: map[string]int64{}}
+	cfg, err := loadSetup(os.Getenv, log)
+	if err != nil {
+		fatal(err)
+	}
+	log.Info("configured", "provider", cfg.providerName, "tenants", cfg.tenants.Count(), "searches", cfg.limits.Searches, "reads", cfg.limits.Reads, "windowSeconds", int(cfg.limits.Window.Seconds()))
+	met := &metrics{counts: map[[2]string]int64{}, nanos: map[string]int64{}, refused: map[[2]string]int64{}}
 	srv := mcp.New("idp-web", version,
 		"Searches the web and reads pages: web_search returns results with a ref, web_fetch reads a result with its ref, web_open_url reads an address the member gave and needs the member's confirmation.",
-		tools.New(log, met, requireCaller))
+		tools.New(tools.Config{Log: log, Metrics: met, RequireCaller: requireCaller, Provider: cfg.provider, Reader: newReader(log, testOrigins),
+			Keys: cfg.keys, Tenants: cfg.tenants, TestOrigins: testOrigins, Limits: cfg.limits}))
 	srv.Log = log
 
 	keysFile, audience := os.Getenv("IDP_WEB_CALLER_KEYS_FILE"), os.Getenv("IDP_WEB_CALLER_AUDIENCE")
@@ -159,8 +215,7 @@ func main() {
 	main := &http.Server{Addr: listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 90 * time.Second}
 	ops := http.NewServeMux()
 	ops.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") })
-	// nothing is behind the service yet (no search service, no reader), so it is ready when it is up
-	ops.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ready") })
+	ops.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { readyz(w, cfg) })
 	ops.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) { met.write(w) })
 	opsSrv := &http.Server{Addr: metricsAddr, Handler: ops, ReadHeaderTimeout: 10 * time.Second}
 

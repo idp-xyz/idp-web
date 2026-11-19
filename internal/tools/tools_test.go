@@ -28,6 +28,15 @@ func (c *counting) Observe(tool, outcome string, _ time.Duration) {
 	c.calls[tool+"/"+outcome]++
 }
 
+func (c *counting) Refused(tool, reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.calls == nil {
+		c.calls = map[string]int{}
+	}
+	c.calls["refused/"+tool+"/"+reason]++
+}
+
 const meta = `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}`
 
 // call posts a tools/call as the given forwarded caller ("" forwards none) and returns the HTTP status and the result.
@@ -49,8 +58,14 @@ func call(t *testing.T, s *mcp.Server, caller, tool string, args any) (int, map[
 	return w.Code, res
 }
 
+// server declares the tools with no provider, reader, keys or tenants: enough for the schemas, the arguments and the
+// caller check. The behaviour of the tools is in e2e_test.go.
 func server(met Metrics, require bool) *mcp.Server {
-	return mcp.New("idp-web", "test", "", New(slog.New(slog.DiscardHandler), met, require))
+	return mcp.New("idp-web", "test", "", New(Config{Log: slog.New(slog.DiscardHandler), Metrics: met, RequireCaller: require}))
+}
+
+func declared() []mcp.Tool {
+	return New(Config{Metrics: &counting{}, RequireCaller: true})
 }
 
 func text(res map[string]any) string {
@@ -59,7 +74,7 @@ func text(res map[string]any) string {
 
 func TestEveryToolHasASchemaTheGatewayCanPin(t *testing.T) {
 	names := map[string]bool{}
-	for _, tool := range New(slog.New(slog.DiscardHandler), &counting{}, true) {
+	for _, tool := range declared() {
 		names[tool.Name] = true
 		if !strings.HasPrefix(tool.Name, "web_") || tool.Description == "" || tool.InputSchema["type"] != "object" || tool.InputSchema["additionalProperties"] != false {
 			t.Errorf("%s: %v", tool.Name, tool.InputSchema)
@@ -91,7 +106,7 @@ func TestTheSchemasRequireWhatThePlanSays(t *testing.T) {
 		"web_fetch":    {[]string{"url", "ref"}, []string{"url", "ref", "offset"}},
 		"web_open_url": {[]string{"url"}, []string{"url", "offset"}},
 	}
-	for _, tool := range New(slog.New(slog.DiscardHandler), &counting{}, true) {
+	for _, tool := range declared() {
 		w := want[tool.Name]
 		if fmt.Sprint(tool.InputSchema["required"]) != fmt.Sprint(w.required) {
 			t.Errorf("%s requires %v", tool.Name, tool.InputSchema["required"])
@@ -106,21 +121,21 @@ func TestTheSchemasRequireWhatThePlanSays(t *testing.T) {
 			}
 		}
 	}
-	count := New(slog.New(slog.DiscardHandler), &counting{}, true)[0].InputSchema["properties"].(map[string]any)["count"].(map[string]any)
+	count := declared()[0].InputSchema["properties"].(map[string]any)["count"].(map[string]any)
 	if count["minimum"] != 1 || count["maximum"] != 10 {
 		t.Errorf("count is %v", count)
 	}
 }
 
-func TestEveryToolSaysItIsNotAvailableYetToAValidCall(t *testing.T) {
+func TestWithNoProviderEveryToolSaysSoToAValidCallInsteadOfFailing(t *testing.T) {
 	s := server(&counting{}, true)
 	for tool, args := range map[string]map[string]any{
 		"web_search":   {"query": "idp", "count": 3, "freshness": "week"},
-		"web_fetch":    {"url": "https://example.com/", "ref": "00000000.AAAAAAAAAAAAAAAA", "offset": 0},
+		"web_fetch":    {"url": "https://example.com/", "ref": "00000000.aaaaaaaaaaaaaaaa", "offset": 0},
 		"web_open_url": {"url": "https://example.com/"},
 	} {
 		code, res := call(t, s, "alice", tool, args)
-		if code != 200 || res["isError"] != true || text(res) != ErrNotAvailable.Error() {
+		if code != 200 || res["isError"] != true {
 			t.Errorf("%s: %d %v", tool, code, res)
 		}
 	}
@@ -201,16 +216,5 @@ func TestWithAVerifierAnUnsignedCallGets403AndNoHandlerRuns(t *testing.T) {
 				}
 			}
 		}
-	}
-}
-
-func TestTheAuditLineNamesTheCallerByHashOnly(t *testing.T) {
-	var buf strings.Builder
-	log := slog.New(slog.NewJSONHandler(&buf, nil))
-	s := mcp.New("idp-web", "test", "", New(log, &counting{}, true))
-	call(t, s, "alice-subject-1234", "web_search", map[string]any{"query": "a secret question"})
-	line := buf.String()
-	if strings.Contains(line, "alice-subject-1234") || strings.Contains(line, "a secret question") || !strings.Contains(line, `"caller":"`+short("t1/alice-subject-1234")+`"`) || !strings.Contains(line, `"tool":"web_search"`) {
-		t.Fatalf("%s", line)
 	}
 }

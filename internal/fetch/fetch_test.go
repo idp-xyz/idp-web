@@ -664,3 +664,41 @@ func TestTheCheckedDialRefusesWhatTheParserWouldHaveRefusedItself(t *testing.T) 
 	}
 	c.Close()
 }
+
+// The Reader is shared by every tenant, so the tenant's rule arrives with the call: a refusal on the redirect means
+// nothing is sent to the second host, and a call without the rule is unaffected.
+func TestAnAllowRuleOfTheCallSeesEveryAddressAndCanRefuseARedirect(t *testing.T) {
+	var hitB atomic.Int32
+	a := newEnv(t, routes{})
+	b := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/robots.txt" {
+			http.NotFound(w, r)
+			return
+		}
+		hitB.Add(1)
+		html(articleBody)(w, r)
+	}))
+	defer b.Close()
+	ap, bp := portOf(t, a.srv.URL), portOf(t, b.URL)
+	a.srv.Config.Handler = routes{"/go": redirect("http://b.test:" + bp + "/page"), "/robots.txt": func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }}
+	a.res.add("a.test", "127.0.0.1").add("b.test", "127.0.0.1")
+	for _, h := range []string{"a.test:" + ap, "b.test:" + bp} {
+		a.r.cfg.TestOrigins[h] = true
+		a.r.opts.TestOrigins[h] = true
+	}
+	refused := errors.New("the domain is not on the tenant's list")
+	ctx := WithAllow(context.Background(), func(host string) error {
+		if host == "b.test" {
+			return refused
+		}
+		return nil
+	})
+	_, err := a.r.Read(ctx, "http://a.test:"+ap+"/go")
+	is(t, err, refused)
+	if hitB.Load() != 0 {
+		t.Error("the second host was contacted after the rule refused it")
+	}
+	if _, err = a.r.Read(context.Background(), "http://a.test:"+ap+"/go"); err != nil {
+		t.Errorf("a call without the rule: %v", err)
+	}
+}
