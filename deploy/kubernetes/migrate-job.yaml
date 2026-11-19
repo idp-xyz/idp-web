@@ -1,0 +1,51 @@
+# Schema migrations of the idp-web database, run as the schema owner before a new image version is rolled out (`idp-web serve`
+# refuses to start on a schema that is not at the version it needs, so run this Job first and then roll the Deployment). It
+# creates the tables and the role idp_web_app; the login role the service runs as is made once, by the operator, with
+# `idp-web ensure-login` (docs/RUNBOOK.md 9). The owner's URL is in the Secret idp-web-database-owner, which only this Job mounts.
+# A Job's template cannot be changed after it was created: delete the old one (or wait for ttlSecondsAfterFinished) before
+# applying a new image.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: idp-web-migrate
+  namespace: idp-web
+  labels:
+    app.kubernetes.io/component: migrate
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10580
+        runAsGroup: 10580
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: idp-web
+          args: ["migrate"]                        # the image's entrypoint is /idp-web
+          env:
+            - name: IDP_WEB_MIGRATION_DATABASE_URL_FILE
+              value: /etc/idp/database-owner/owner-url
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - {name: database-owner, mountPath: /etc/idp/database-owner, readOnly: true}
+      volumes:
+        - name: database-owner
+          secret:
+            secretName: idp-web-database-owner        # created by the operator: owner-url (and ca.crt if the URL names sslrootcert there)

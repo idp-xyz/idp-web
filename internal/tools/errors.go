@@ -20,7 +20,29 @@ var (
 	ErrInvalid      = errors.New("the arguments are not valid")
 	ErrNoCaller     = errors.New("no caller identity: this server must be registered with identity=forward")
 	ErrRateLimited  = errors.New("too many calls in a short time")
+	// ErrQuotaExceeded: the tenant's daily limit is used up (ADR-0001 D28).
+	ErrQuotaExceeded = errors.New("the daily limit is used up")
+	// ErrQuotaUnavailable: the limit could not be checked, so the call is not made. Never "allowed without counting".
+	ErrQuotaUnavailable = errors.New("the daily limit could not be checked")
+	// ErrNumberingUnavailable: the database that numbers the sources did not answer (ADR-0001 D29).
+	ErrNumberingUnavailable = errors.New("the sources could not be numbered")
 )
+
+// quotaExceeded says which daily limit is used up.
+type quotaExceeded struct{ what string }
+
+func (e *quotaExceeded) Error() string {
+	return fmt.Sprintf("the daily limit of %s for your organisation is used up; it resets at 00:00 UTC: do not try again today, and answer with what you have", e.what)
+}
+func (e *quotaExceeded) Is(target error) bool { return target == ErrQuotaExceeded }
+
+// quotaUnavailable says which daily limit could not be checked.
+type quotaUnavailable struct{ what string }
+
+func (e *quotaUnavailable) Error() string {
+	return fmt.Sprintf("the daily limit of %s could not be checked just now, so the call was not made: try again in a little while, or answer with what you have", e.what)
+}
+func (e *quotaUnavailable) Is(target error) bool { return target == ErrQuotaUnavailable }
 
 // rateLimited carries when the caller may try again.
 type rateLimited struct {
@@ -65,6 +87,9 @@ var mappings = []mapping{
 	{ErrNoCaller, "no_caller", decisionRefused, ""},
 	{ErrNotAvailable, "unavailable", decisionFailed, ""},
 	{ErrRateLimited, "rate_limited", decisionRefused, ""},
+	{ErrQuotaExceeded, "quota_exceeded", decisionRefused, ""},
+	{ErrQuotaUnavailable, "quota_unavailable", decisionRefused, ""},
+	{ErrNumberingUnavailable, "numbering_unavailable", decisionFailed, "the sources of this answer could not be numbered just now: try again in a little while, or answer with what you have"},
 	{refs.ErrMalformed, "ref_malformed", decisionRefused, "that address did not come from a search result, or its ref is not the one listed: " + search1 + "; other addresses cannot be read"},
 	{refs.ErrNotForIt, "ref_mismatch", decisionRefused, "that address did not come from a search result: " + search1 + "; other addresses cannot be read"},
 	{refs.ErrExpired, "ref_expired", decisionRefused, "the ref has expired: search again to get a fresh address and ref"},

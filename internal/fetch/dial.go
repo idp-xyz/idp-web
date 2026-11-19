@@ -11,6 +11,24 @@ import (
 	"idp-web/internal/addr"
 )
 
+type dialedKey struct{}
+
+// WithDialed returns a context whose reads call fn each time the reader is about to connect to an address that passed
+// the address rules: from then on a request is on its way to the web. A read that ends without fn ever called sent nothing
+// (refused by the address rules, a name that did not resolve, a deadline before the first connection), which is what the
+// daily quota of idp-web uses to give the unit back (ADR-0001 D28). It may be called from the transport's goroutines.
+func WithDialed(ctx context.Context, fn func()) context.Context {
+	return context.WithValue(ctx, dialedKey{}, fn)
+}
+
+// Dialing tells the call's WithDialed function, if it has one, that a connection to the web is about to be made. The reader
+// does it; anything that stands in for the reader (a test double) does it when it means to have gone out.
+func Dialing(ctx context.Context) {
+	if fn, _ := ctx.Value(dialedKey{}).(func()); fn != nil {
+		fn()
+	}
+}
+
 // checkedDial is the only way the reader makes a connection (ADR-0001 D8). It resolves the host once, refuses the
 // connection when ANY address that came back is not public (the Python reference does the same: a name that has one
 // private answer among its public ones is a name an attacker controls), and connects to an address it checked, given
@@ -54,6 +72,7 @@ func (r *Reader) checkedDial(ctx context.Context, network, address string) (net.
 			}
 		}
 	}
+	Dialing(ctx)
 	dial := r.dial
 	if dial == nil {
 		dial = (&net.Dialer{}).DialContext

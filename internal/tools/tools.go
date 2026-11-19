@@ -39,6 +39,23 @@ type Reader interface {
 	Read(ctx context.Context, rawURL string) (fetch.Page, error)
 }
 
+// State is the shared, durable state: the daily quota and the numbers of the sources (internal/state.Store; ADR-0001 D28,
+// D29). Without one, numbering is in memory and per replica, and no daily limit can be kept.
+type State interface {
+	// Take takes one unit of the tenant's daily quota of kind (state.Searches, state.Reads) for the UTC day of now, if fewer
+	// than limit have been taken, and says whether it did. An error means it could not tell.
+	Take(ctx context.Context, tenant, kind string, now time.Time, limit int) (bool, error)
+	// Release gives a unit back.
+	Release(ctx context.Context, tenant, kind string, now time.Time) error
+	// Number gives the caller's number for each address, a new address the next free number.
+	Number(ctx context.Context, caller string, addresses []string, now time.Time) ([]int, error)
+}
+
+// numberer gives numbers; both a State and the in-memory sources are one.
+type numberer interface {
+	Number(ctx context.Context, caller string, addresses []string, now time.Time) ([]int, error)
+}
+
 // Limits of the arguments, in the schemas and checked again here: the gateway validates against the pinned schema, but
 // this server does not rely on it.
 const (
@@ -74,6 +91,8 @@ type Config struct {
 	Reader   Reader
 	Keys     *refs.Keys
 	Tenants  *tenants.Set
+	// State is the database; nil means none (numbering in memory, and a tenant with a daily limit is refused).
+	State State
 	// TestOrigins are exempt from the address rules, for tests only (ADR-0001 D14); the same set the reader has.
 	TestOrigins map[string]bool
 
@@ -92,6 +111,7 @@ type api struct {
 	log     *slog.Logger
 	met     Metrics
 	sources *sources
+	numbers numberer
 	cache   *pageCache
 	limits  *limiter
 }
@@ -254,6 +274,10 @@ func New(cfg Config) []mcp.Tool {
 	a := &api{cfg: cfg, log: cfg.Log, met: cfg.Metrics,
 		sources: newSources(cfg.Now), cache: newPageCache(cfg.Now, cfg.CacheEntries, cfg.CacheBytes),
 		limits: newLimiter(cfg.Now, cfg.Limits.Window, map[string]int{"searches": cfg.Limits.Searches, "reads": cfg.Limits.Reads})}
+	a.numbers = a.sources
+	if cfg.State != nil {
+		a.numbers = cfg.State
+	}
 	return []mcp.Tool{
 		{Name: "web_search",
 			Description: "Search the web and return a numbered list of results: title, address, a reference (ref) for the address, the publication date when known and an excerpt. Read a result with web_fetch, giving its address and its ref exactly as listed.",

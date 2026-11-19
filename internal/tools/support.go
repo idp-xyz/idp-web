@@ -2,6 +2,7 @@ package tools
 
 import (
 	"container/list"
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -14,9 +15,10 @@ import (
 // address keeps it; a new address gets the next free number. Numbers are never reused, so a number never names two
 // addresses, even after an address has been forgotten.
 //
-// The table lives in this process's memory, per caller: it is forgotten after an hour without use and is bounded in
-// callers and in addresses per caller. That is right for one replica, which is what phase 1 runs; with several, or
-// after a restart, the numbering would diverge, so in phase 2 it moves to the HOST's `sources` (ADR-0003 D9).
+// This is the numbering when no database is configured: the table lives in this process's memory, per caller, forgotten
+// after an hour without use and bounded in callers and in addresses per caller. That is right for one replica; with
+// several, or after a restart, the numbering would diverge. With a database the same rules are kept there, for every
+// replica and across restarts (internal/state, ADR-0001 D29).
 type sources struct {
 	mu         sync.Mutex
 	now        func() time.Time
@@ -39,6 +41,15 @@ type numbered struct {
 
 func newSources(now func() time.Time) *sources {
 	return &sources{now: now, ttl: time.Hour, maxCallers: 10000, maxURLs: 1000, callers: map[string]*numbering{}}
+}
+
+// Number is state.Store.Number for a process with no database: the numbers of the addresses, in the order asked.
+func (s *sources) Number(_ context.Context, caller string, addresses []string, _ time.Time) ([]int, error) {
+	out := make([]int, len(addresses))
+	for i, a := range addresses {
+		out[i] = s.number(caller, a)
+	}
+	return out, nil
 }
 
 // number returns the caller's number for the address, giving it one when it has none.

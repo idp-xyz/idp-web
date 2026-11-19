@@ -140,3 +140,63 @@ func TestTheFileIsReadFromDisk(t *testing.T) {
 		t.Errorf("%v", err)
 	}
 }
+
+// A daily limit is absent (no limit), a number (that many), or 0 (none at all): the three are different and the file keeps
+// them apart. The default and a tenant's own entry are not merged, as with every other setting: a named tenant has what its
+// entry says, so an entry with no limit has none even when the default has one.
+func TestADailyLimitIsAbsentANumberOrZeroAndATenantsEntryReplacesTheDefaultsLimits(t *testing.T) {
+	s := parse(t, `
+default: {enabled: true, dailySearches: 100, dailyReads: 300}
+tenants:
+  acme: {enabled: true, dailySearches: 10}
+  none: {enabled: true, dailySearches: 0, dailyReads: 0}
+  free: {enabled: true}
+  nulls: {enabled: true, dailySearches: ~}
+`)
+	for tenant, want := range map[string]struct {
+		kind    string
+		limit   int
+		limited bool
+	}{
+		"stranger/searches": {"searches", 100, true},
+		"stranger/reads":    {"reads", 300, true},
+		"acme/searches":     {"searches", 10, true},
+		"acme/reads":        {"reads", 0, false},
+		"none/searches":     {"searches", 0, true},
+		"none/reads":        {"reads", 0, true},
+		"free/searches":     {"searches", 0, false},
+		"nulls/searches":    {"searches", 0, false},
+	} {
+		name, _, _ := strings.Cut(tenant, "/")
+		if l, ok := s.For(name).Daily(want.kind); l != want.limit || ok != want.limited {
+			t.Errorf("%s: limit %d, limited %v; want %d, %v", tenant, l, ok, want.limit, want.limited)
+		}
+	}
+	if got := strings.Join(s.DailyLimited(), ","); got != "acme,default,none" {
+		t.Errorf("the entries with a daily limit: %s", got)
+	}
+	if got := parse(t, file).DailyLimited(); len(got) != 0 {
+		t.Errorf("a file with no limits names %v", got)
+	}
+	if _, ok := (Policy{}).Daily("other"); ok {
+		t.Error("a kind nobody knows is limited")
+	}
+}
+
+func TestADailyLimitThatIsNegativeTooLargeOrNotAWholeNumberIsAnErrorThatNamesIt(t *testing.T) {
+	for name, c := range map[string]struct{ yaml, want string }{
+		"negative":    {"tenants: {a: {enabled: true, dailySearches: -1}}", "dailySearches must be a whole number from 0 to 1000000000"},
+		"too large":   {"tenants: {a: {enabled: true, dailyReads: 1000000001}}", "dailyReads must be a whole number"},
+		"a fraction":  {"tenants: {a: {enabled: true, dailyReads: 1.5}}", "not a whole number"},
+		"a string":    {"tenants: {a: {enabled: true, dailySearches: many}}", "not a whole number"},
+		"the default": {"default: {enabled: true, dailySearches: -5}", "default"},
+		"a misspelt":  {"tenants: {a: {enabled: true, dailySearch: 5}}", "dailySearch"},
+	} {
+		if _, err := Parse([]byte(c.yaml)); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := Parse([]byte("tenants: {a: {enabled: true, dailySearches: 1000000000}}")); err != nil {
+		t.Errorf("the largest limit: %v", err)
+	}
+}

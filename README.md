@@ -2,7 +2,7 @@
 
 IDP TELOS 的联网组件：一个 MCP 服务器，让 Agent 搜索网页、读取网页内容。它放在 idp-mcp 网关后面作为上游：认证、授权、参数校验和调用审计都是网关的事；idp-web 只接受网关签了名的调用者。整体设计见平台仓库的 ADR-0003（网页搜索与读取），本仓库自己的决策见 [`docs/adr/ADR-0001-web-design.md`](docs/adr/ADR-0001-web-design.md)。
 
-状态：**三个工具可用**。MCP 服务、调用者校验、地址检查与读取、正文提取、搜索适配器（`exa`、`brave`、`fixture`）、签名的 `ref`、租户文件、限流、读取缓存、审计、指标、镜像、CI 和 Kubernetes 清单都已具备。设计决策见 ADR-0001（D1 到 D26）。运维见 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)。
+状态：**三个工具可用**。MCP 服务、调用者校验、地址检查与读取、正文提取、搜索适配器（`exa`、`brave`、`fixture`）、签名的 `ref`、租户文件、限流、每日配额与来源编号（PostgreSQL）、读取缓存、审计、指标、镜像、CI 和 Kubernetes 清单都已具备。设计决策见 ADR-0001（D1 到 D26）。运维见 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)。
 
 ## 工具
 
@@ -19,7 +19,8 @@ IDP TELOS 的联网组件：一个 MCP 服务器，让 Agent 搜索网页、读�
 ## 使用
 
 ```bash
-make test               # gofmt、vet、单元测试（-race）
+make test               # gofmt、vet、单元测试（-race）；需要数据库的测试在这里跳过
+make test-integration   # 起一个一次性的 PostgreSQL（随机回环端口、容器名 PG_NAME，用完删掉），跑需要数据库的测试：每日配额、来源编号
 make build              # bin/idp-web
 bash deploy/build.sh    # 镜像（scratch，用户 65532）：宿主上静态编译，再 docker build --network none
 ```
@@ -30,7 +31,7 @@ CI 里的第三方镜像（扫描用的 trivy）先由 `deploy/pull-image.sh` �
 
 ## 在 Kubernetes 上
 
-`deploy/kubernetes`（命名空间 `idp-web`，一个副本，restricted，默认拒绝的 NetworkPolicy，出口只到公网地址的 443 与 80）：`kubectl apply -k deploy/kubernetes`，之前要先建 `ref` 密钥、网关公钥和搜索服务的密钥，并选搜索服务，步骤见 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)。发布的租户文件里谁也不能用，发布的清单里没有搜索服务的默认值（没选就不启动）。在 idp-mcp 里登记的端点，也就是 `IDP_WEB_CALLER_AUDIENCE`，在 Kubernetes 上是 Service 的地址：`http://idp-web.idp-web.svc.cluster.local:8580/mcp`。清单由 `tests/deploy` 检查（与代码一致、没有测试专用的东西、出口规则与 `internal/addr` 一致），整平台的验收是 idp-telos-go 的 `tests/kind/full.sh`（PATH M 与 N）。
+`deploy/kubernetes`（命名空间 `idp-web`，配置了数据库，缺省一个副本、可调高，restricted，默认拒绝的 NetworkPolicy，出口只到公网地址的 443 与 80）：`kubectl apply -k deploy/kubernetes`，之前要先建 `ref` 密钥、网关公钥和搜索服务的密钥，建数据库并跑迁移（Job `idp-web-migrate`，Secret `idp-web-database` 与 `idp-web-database-owner`），并选搜索服务，步骤见 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)。发布的租户文件里谁也不能用，发布的清单里没有搜索服务的默认值（没选就不启动）。在 idp-mcp 里登记的端点，也就是 `IDP_WEB_CALLER_AUDIENCE`，在 Kubernetes 上是 Service 的地址：`http://idp-web.idp-web.svc.cluster.local:8580/mcp`。清单由 `tests/deploy` 检查（与代码一致、没有测试专用的东西、出口规则与 `internal/addr` 一致），整平台的验收是 idp-telos-go 的 `tests/kind/full.sh`（PATH M 与 N）。
 
 ## 配置
 
@@ -56,6 +57,9 @@ CI 里的第三方镜像（扫描用的 trivy）先由 `deploy/pull-image.sh` �
 | `IDP_WEB_LIMIT_SEARCHES` | `30` | 每个调用者在窗口内的搜索次数 |
 | `IDP_WEB_LIMIT_READS` | `30` | 每个调用者在窗口内真正发往网站的读取次数（缓存命中的后几段不算） |
 | `IDP_WEB_LIMIT_WINDOW_S` | `600` | 窗口，秒 |
+| `IDP_WEB_DATABASE_URL` 或 `IDP_WEB_DATABASE_URL_FILE` | 空 | PostgreSQL 的 URL（服务角色，`idp_web_app` 的成员，不能是超级用户）；带密码，所以在 Kubernetes 上用 `_FILE`（挂载的 Secret）；TLS 写在 URL 里（`sslmode=verify-full&sslrootcert=…`）。**不设：没有数据库**，编号在内存里、按副本，租户文件里不能写每日限额（写了启动即退出） |
+| `IDP_WEB_DATABASE_TIMEOUT_MS` | `2000` | 数据库的一条语句最多等多久；超时的调用被拒绝（`quota_unavailable`），不放行 |
+| `IDP_WEB_MIGRATION_DATABASE_URL`（`_FILE`）、`IDP_WEB_APP_DB_PASSWORD`（`_FILE`） | 空 | 只用于 `idp-web migrate` 与 `idp-web ensure-login USER`（所有者的 URL；登录角色的密码），与 idp-mcp、idp-host 的 `migrate`、`ensure-login` 同一套 |
 
 密钥一律从文件读，不从环境变量读。
 
@@ -69,10 +73,12 @@ tenants:
     includeDomains: [example.com]  # 可空：空表示所有域名；域名项连子域名一起匹配
     excludeDomains: [private.example.com]   # 排除优先于包含
     openUrl: false                 # web_open_url，缺省为关
+    dailySearches: 200             # 每个 UTC 日这个租户最多搜索几次；不写：不限；0：一次都不允许
+    dailyReads: 600                # 同上，真正发往网站的读取（缓存命中的不算）
   labs: {enabled: true, openUrl: true}
 ```
 
-未知的键是错误。域名名单在搜索时传给服务商，并由 idp-web 自己在搜索结果和读取（包括每次重定向）时再强制一次。
+未知的键是错误。`dailySearches`、`dailyReads` 的整个规则（什么算一次、超出时模型读到什么、数据库不可用时怎么办）在 ADR-0001 D28；写了其中任何一个，就必须配置数据库（D29）。域名名单在搜索时传给服务商，并由 idp-web 自己在搜索结果和读取（包括每次重定向）时再强制一次。
 
 ### fixture 文件
 
@@ -110,7 +116,7 @@ curl -s localhost:8580/mcp -H 'MCP-Protocol-Version: 2026-07-28' -H 'Content-Typ
 
 ## 已知差距
 
-每次运行的调用上限做不到（调用者断言里没有运行号）：阶段 1 按调用者限流，每次运行的上限由 HOST 的步数限制兜底。编号、限流与缓存在内存里，按副本：阶段 1 只跑一个副本，阶段 2 把编号移到 HOST 的 `sources`。
+每次运行的调用上限做不到（调用者断言里没有运行号）：按调用者限流，每次运行的上限由 HOST 的步数限制兜底。**状态**：每日配额与来源编号在 PostgreSQL 里（D28、D29），配置了数据库就可以跑多个副本；读取缓存和滑动窗口限流仍在内存里、按副本，N 个副本时一个调用者在窗口内最多可做 N 倍的调用，每日配额才是精确的上限。不配置数据库时编号在内存里，只能单副本，也不能设每日限额。配置了数据库而数据库不可用时：有限额的租户的调用被拒绝（`quota_unavailable`），其余租户的搜索与读取也做不了（来源编号取不到，`numbering_unavailable`）。
 
 ## 许可证
 

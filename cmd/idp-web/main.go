@@ -33,6 +33,18 @@
 //	IDP_WEB_TEST_ORIGINS      for tests only: comma-separated host:port pairs the reader may contact although they are
 //	                          not public addresses or not on port 80 or 443 (ADR-0001 D14). Nothing else is exempted
 //
+//	IDP_WEB_DATABASE_URL      the database that keeps the daily quotas and the source numbers (ADR-0001 D28, D29): a
+//	                          PostgreSQL URL of a login role that is a member of idp_web_app, never a superuser; the TLS
+//	                          options are the URL's (sslmode=verify-full, sslrootcert=...). The URL holds the password, so it
+//	                          may instead come from a file: IDP_WEB_DATABASE_URL_FILE (a mounted Secret). Not set: no
+//	                          database, numbering in memory and per replica, and a tenant that sets dailySearches or
+//	                          dailyReads is a configuration error
+//	IDP_WEB_DATABASE_TIMEOUT_MS  how long a statement may take before the call is refused (default 2000)
+//
+// `idp-web migrate` applies the schema as the owner (IDP_WEB_MIGRATION_DATABASE_URL[_FILE]); `idp-web ensure-login USER`
+// creates or updates the login role, a member of idp_web_app, with the password in IDP_WEB_APP_DB_PASSWORD[_FILE], as
+// idp-mcp and idp-host do. Both print one line and exit 0, or write the error to stderr and exit 1.
+//
 // `idp-web -check-tls https://host/` reads one page through the reader and exits; it shows that TLS verifies from
 // inside the image, which has no CA certificates of its own (ADR-0001 D13).
 //
@@ -170,11 +182,19 @@ func (m *metrics) write(w http.ResponseWriter) {
 	}
 }
 
-// readyz answers 200 only when the search provider, the ref key and the tenants file are loaded; otherwise 503 and
-// what is missing.
+// readyz answers 200 only when the search provider, the ref key and the tenants file are loaded and, when a database is
+// configured, it answers; otherwise 503 and what is missing.
 func readyz(w http.ResponseWriter, s *setup) {
-	if m := s.missing(); len(m) > 0 {
-		http.Error(w, "not ready: "+strings.Join(m, ", ")+" not loaded", http.StatusServiceUnavailable)
+	m := s.missing()
+	var why []string
+	if len(m) > 0 {
+		why = append(why, strings.Join(m, ", ")+" not loaded")
+	}
+	if s.unreachable() {
+		why = append(why, "database not reachable")
+	}
+	if len(why) > 0 {
+		http.Error(w, "not ready: "+strings.Join(why, "; "), http.StatusServiceUnavailable)
 		return
 	}
 	fmt.Fprintln(w, "ready")
@@ -187,6 +207,9 @@ func main() {
 		code := checkTLS(ctx, os.Args[2:], os.Stdout, os.Stderr, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		stop()
 		os.Exit(code)
+	}
+	if len(os.Args) > 1 && (os.Args[1] == "migrate" || os.Args[1] == "ensure-login") {
+		os.Exit(database(context.Background(), os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
 	}
 	testOrigins, err := parseTestOrigins(os.Getenv("IDP_WEB_TEST_ORIGINS"))
 	if err != nil {
@@ -211,12 +234,16 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	log.Info("configured", "provider", cfg.providerName, "tenants", cfg.tenants.Count(), "searches", cfg.limits.Searches, "reads", cfg.limits.Reads, "windowSeconds", int(cfg.limits.Window.Seconds()))
+	var st tools.State // stays nil, not a nil *state.Store, when there is no database
+	if cfg.store != nil {
+		st = cfg.store
+	}
+	log.Info("configured", "provider", cfg.providerName, "tenants", cfg.tenants.Count(), "database", cfg.store != nil, "dailyLimited", len(cfg.tenants.DailyLimited()), "searches", cfg.limits.Searches, "reads", cfg.limits.Reads, "windowSeconds", int(cfg.limits.Window.Seconds()))
 	met := &metrics{counts: map[[2]string]int64{}, nanos: map[string]int64{}, refused: map[[2]string]int64{}, failed: map[[2]string]int64{}}
 	srv := mcp.New("idp-web", version,
 		"Searches the web and reads pages: web_search returns results with a ref, web_fetch reads a result with its ref, web_open_url reads an address the member gave and needs the member's confirmation.",
 		tools.New(tools.Config{Log: log, Metrics: met, RequireCaller: requireCaller, Provider: cfg.provider, Reader: newReader(log, testOrigins),
-			Keys: cfg.keys, Tenants: cfg.tenants, TestOrigins: testOrigins, Limits: cfg.limits}))
+			Keys: cfg.keys, Tenants: cfg.tenants, State: st, TestOrigins: testOrigins, Limits: cfg.limits}))
 	srv.Log = log
 
 	keysFile, audience := os.Getenv("IDP_WEB_CALLER_KEYS_FILE"), os.Getenv("IDP_WEB_CALLER_AUDIENCE")
@@ -247,6 +274,10 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if cfg.store != nil {
+		defer cfg.store.Close()
+		go cfg.store.Run(ctx, 10*time.Minute, time.Now, func(err error) { log.Error("the sweep of expired numberings and old quota days failed", "err", err) })
+	}
 	errc := make(chan error, 2)
 	go func() { errc <- main.ListenAndServe() }()
 	go func() { errc <- opsSrv.ListenAndServe() }()

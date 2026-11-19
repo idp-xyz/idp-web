@@ -103,6 +103,7 @@ type world struct {
 	clk    *clock
 	keys   *refs.Keys
 	prov   *countingProvider
+	cfg    Config
 
 	mu   sync.Mutex
 	hits map[string]int // by path
@@ -126,6 +127,8 @@ func article() string {
 }
 
 type options struct {
+	tenants  string // the tenants file; tenantsYAML when empty
+	state    State
 	limits   Limits
 	provider func(fixture search.Provider) search.Provider
 	reader   Reader
@@ -150,6 +153,8 @@ func newWorld(t *testing.T, o ...options) *world {
 			http.Redirect(rw, r, "http://blocked.test:"+w.port+"/page", http.StatusFound)
 		case "/gone":
 			http.NotFound(rw, r)
+		case "/to": // a redirect to wherever the query says
+			http.Redirect(rw, r, r.URL.Query().Get("to"), http.StatusFound)
 		default:
 			rw.Header().Set("Content-Type", "text/html; charset=utf-8")
 			io.WriteString(rw, page)
@@ -194,7 +199,11 @@ entries:
 	if opt.provider != nil {
 		prov = opt.provider(fx)
 	}
-	set, err := tenants.Parse([]byte(tenantsYAML))
+	file := tenantsYAML
+	if opt.tenants != "" {
+		file = opt.tenants
+	}
+	set, err := tenants.Parse([]byte(file))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,8 +212,9 @@ entries:
 		t.Fatal(err)
 	}
 	w.keys = keys.WithClock(w.clk.now)
-	w.srv = mcp.New("idp-web", "test", "", New(Config{Log: log, Metrics: w.met, RequireCaller: true, Provider: prov, Reader: reader, Keys: w.keys,
-		Tenants: set, TestOrigins: origins, Limits: opt.limits, Now: w.clk.now}))
+	w.cfg = Config{Log: log, Metrics: w.met, RequireCaller: true, Provider: prov, Reader: reader, Keys: w.keys,
+		Tenants: set, State: opt.state, TestOrigins: origins, Limits: opt.limits, Now: w.clk.now}
+	w.srv = mcp.New("idp-web", "test", "", New(w.cfg))
 	return w
 }
 
@@ -215,6 +225,19 @@ func (w *world) url(host, path string) string {
 // as calls a tool as the verified caller tenant/subject and returns the result.
 func (w *world) as(tenant, subject, tool string, args any) map[string]any {
 	w.t.Helper()
+	return w.asOn(w.srv, tenant, subject, tool, args)
+}
+
+// replica is another instance of the service over the same world (the same provider, the same origin and keys, the same
+// clock) with a State of its own, as a second pod would be; it has its own cache and its own sliding window.
+func (w *world) replica(st State) *mcp.Server {
+	cfg := w.cfg
+	cfg.State = st
+	return mcp.New("idp-web", "test", "", New(cfg))
+}
+
+func (w *world) asOn(srv *mcp.Server, tenant, subject, tool string, args any) map[string]any {
+	w.t.Helper()
 	a, _ := json.Marshal(args)
 	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":%q,"arguments":%s,%s,"io.idp.telos/caller":{"subject":%q,"tenant":%q,"roles":["member"]}}}}`,
 		tool, a, meta, subject, tenant)
@@ -222,14 +245,15 @@ func (w *world) as(tenant, subject, tool string, args any) map[string]any {
 	r.Header.Set("MCP-Protocol-Version", mcp.ProtocolVersion)
 	r.Header.Set("Mcp-Method", "tools/call")
 	rec := httptest.NewRecorder()
-	w.srv.ServeHTTP(rec, r)
+	srv.ServeHTTP(rec, r)
 	var out map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		w.t.Fatal(err)
+		w.t.Error(err)
 	}
 	res, _ := out["result"].(map[string]any)
 	if res == nil {
-		w.t.Fatalf("no result: %s", rec.Body)
+		w.t.Errorf("no result: %s", rec.Body)
+		return map[string]any{"isError": true, "content": []any{map[string]any{"text": ""}}}
 	}
 	return res
 }
@@ -718,6 +742,7 @@ func TestTheSitesRefusalsReachTheModelAsSentencesItCanActOn(t *testing.T) {
 func TestEverySentinelHasAFixedSentence(t *testing.T) {
 	for _, err := range []error{
 		ErrInvalid, ErrNoCaller, ErrNotAvailable, &rateLimited{"searches", time.Minute},
+		&quotaExceeded{"searches"}, &quotaUnavailable{"page reads"}, ErrNumberingUnavailable,
 		refs.ErrMalformed, refs.ErrExpired, refs.ErrNotForIt,
 		tenants.ErrDisabled, tenants.ErrOpenDisabled, tenants.ErrExcluded, tenants.ErrNotIncluded,
 		search.ErrUnavailable, search.ErrBusy,

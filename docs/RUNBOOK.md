@@ -5,7 +5,7 @@
 ## 1. 它是什么，怎么接
 
 - 一个 MCP 2026-07-28 服务器，端口 8580（`/mcp`），运维端口 9580（`/healthz`、`/readyz`、`/metrics`）。工具：`web_search`、`web_fetch`、`web_open_url`；经网关时带目标名前缀（`web__web_search`）。
-- **一个副本**：编号 `[n]`、读取缓存和限流都是内存里的、按副本的（D19、D21、D22）。清单的策略是 `Recreate`，滚动重启时的几秒里没有服务，重启后编号从头开始（模型被告知再搜索一次）；`ref` 不受影响，只要密钥还在。不要把副本数改成 2。
+- **副本数：配置了数据库就可以多于一个**（第 9 节）。每日配额与来源编号 `[n]` 在 PostgreSQL 里，所有副本一致、重启之后不变（D28、D29）；读取缓存与滑动窗口限流仍是各副本的（D21、D22）：N 个副本时一个调用者在窗口内最多可做 N 倍的调用，每日配额才是精确的上限。清单的策略是 `RollingUpdate`，`replicas` 写 1，由你调高。**不配数据库（清单之外的部署）则必须是一个副本、策略 `Recreate`**：编号在内存里，两个 Pod 会给同一调用者两套编号；这样的部署也不能在租户文件里写每日限额。`ref` 不受影响，只要密钥在所有副本上一致。
 - **只能放在网关后面**：它的网络策略只放网关和注册服务进来；每个 `tools/call` 还必须带网关签的调用者断言（D2），所以绕过网关、从别的 Pod 直连的请求没有身份，会被 403 拒绝。
 - **它是唯一被允许出站到公网的组件**：命名空间 `idp-web` 里只有它。出口 NetworkPolicy 只放公网地址的 443 与 80，减去 `internal/addr` 拒绝的全部 IPv4 段（私网、回环、链路本地与云元数据、CGNAT、文档、基准测试、保留、组播）；服务自己也拒绝同一批地址，策略是集群对它的再做一遍。只有 IPv4：没有 IPv6 规则，就到不了任何 IPv6 地址。
 
@@ -18,12 +18,14 @@ kubectl apply -f deploy/kubernetes/namespace.yaml
 kubectl -n idp-web create secret generic idp-web-ref-key --from-literal=ref.key="$(openssl rand -base64 48)"
 kubectl -n idp-web create configmap idp-web-gateway-caller-keys --from-file=caller.pub=<网关的公钥 PEM>
 kubectl -n idp-web create secret generic idp-web-search-key --from-literal=exa.key=<Exa 的 API 密钥>    # 或 brave.key
-# 3. 选搜索服务（见 2.1），把镜像换成构建出的、按摘要固定的镜像，再应用
-kubectl apply -k deploy/kubernetes
+# 3. 数据库：Secret 与第一次迁移（第 9 节：建库、建角色、两个 Secret）
+# 4. 选搜索服务（见 2.1），把镜像换成构建出的、按摘要固定的镜像，再应用
+kubectl apply -k deploy/kubernetes          # 含迁移的 Job idp-web-migrate；Deployment 在库迁好之前起不来，会重启到迁好为止
+kubectl -n idp-web wait --for=condition=complete job/idp-web-migrate --timeout=120s
 kubectl -n idp-web rollout status deploy/idp-web
 ```
 
-`ref.key` 至少 32 字节，一行一把。`kubectl -n idp-web logs deploy/idp-web` 里 `idp-web listening` 之后，`/readyz` 才是 200（服务商、`ref` 密钥、租户文件都已载入）。
+`ref.key` 至少 32 字节，一行一把。`kubectl -n idp-web logs deploy/idp-web` 里 `idp-web listening` 之后，`/readyz` 才是 200（服务商、`ref` 密钥、租户文件都已载入，数据库在应答）。
 
 **镜像**：`bash deploy/build.sh` 在宿主上静态编译，再 `docker build --network none`（scratch，用户 65532），推到自己的 registry，把 `kustomization.yaml` 里的 `registry.example.com/idp/idp-web` 和 `sha256:000…` 换成真实值（按摘要，不用标签）。
 
@@ -83,8 +85,11 @@ tenants:
     includeDomains: [example.com]          # 空或不写：所有公网域名；域名连子域名一起匹配
     excludeDomains: [private.example.com]  # 排除优先于包含
     openUrl: false                         # web_open_url：成员自己给地址；只有 true 才可用
+    dailySearches: 200                     # 每个 UTC 日这个租户最多搜索几次：不写＝不限；0＝一次都不允许
+    dailyReads: 600                        # 每个 UTC 日真正发往网站的读取（缓存命中的后几段不算）
 ```
 
+- **每日配额**（`dailySearches`、`dailyReads`，D28）：按租户、按 UTC 日（00:00 UTC 清零），在 PostgreSQL 里数，所有副本共用；搜索在调用服务商时算（服务商答错也算），读取在真正发往网站时算（缓存命中、被地址规则或名单在发出前拒绝的、解析到内部地址而没有连接的，不算）。用完时模型读到"今天的额度用完了，00:00 UTC 恢复，用已有的内容回答"，审计 `reason=quota_exceeded`。写了任何一个限额就必须配置数据库，否则服务启动即退出（2）。租户条目整体替换 `default`，不合并。
 - 服务只在启动时读一次。ConfigMap 由 kustomize 生成，名字随内容变，`apply` 之后 Pod 自动换。直接 `kubectl edit configmap` 不会让服务重读，要 `kubectl -n idp-web rollout restart deploy/idp-web`，而且 `apply` 会把手工改动覆盖回去：以文件为准。
 - 未知的键、不是主机名的域名项（带协议、路径、端口、通配符）是错误，服务启动即退出（2）：看日志，不要猜。
 - 启用 `openUrl` 之前确认 HOST 的 `confirmTools` 已配好（第 3 节）；否则一个被页面里的指令骗了的模型能让服务读任何公网地址。
@@ -113,7 +118,10 @@ tenants:
 | `address_refused` | `refused` | 地址的写法不被接受：不是 http 或 https、端口不是 80 或 443、带用户名密码、非规范的 IP 写法（`2130706433`、`0x7f.1`）、格式错误、过长。还没有碰到地址指向哪里 |
 | `address_not_public` | `refused` | 地址指向内部：IP 字面量不是公网地址（私网、回环、链路本地与元数据、CGNAT、多播、内嵌 IPv4 的 IPv6），或域名解析到了这样的地址，或重定向去了这样的地址。大量出现说明有页面或模型在试探内网（此前这一类也记为 `address_refused`，2026-11-19 起分开） |
 | `robots` | `refused` | 站点的 robots.txt 不许读 |
-| `rate_limited` | `refused` | 调用者超过窗口内的搜索或读取次数（`IDP_WEB_LIMIT_*`） |
+| `rate_limited` | `refused` | 调用者超过窗口内的搜索或读取次数（`IDP_WEB_LIMIT_*`）；窗口按副本数 |
+| `quota_exceeded` | `refused` | 租户今天（UTC）的每日限额用完了（`dailySearches` 或 `dailyReads`，包括限额为 0）；`idp_web_refused_total{reason="quota_exceeded"}` 看用量，第 9 节看怎么查表 |
+| `quota_unavailable` | `refused` | 查不了每日限额（数据库超时、连不上，或没有配置数据库而租户有限额）：调用**没有发出**，也没有计数；日志里有 `the daily quota could not be checked` 与原因。第 9 节 |
+| `numbering_unavailable` | `failed` | 数据库没给出来源编号：配置了数据库时，没有设限额的租户也依赖它；页面已读到的话已进缓存，数据库恢复后重试不会再请求网站 |
 | `invalid_arguments`、`no_caller` | `refused` | 参数不合 schema；请求没带调用者（没经过网关） |
 | `provider_busy`、`provider_error` | `failed` | 搜索服务限流或出错：看服务商的状态与密钥；日志里有详情（`search provider request failed` 或 `search provider answered with an error`，带状态码） |
 | `too_large`、`too_slow`、`content_type`、`pdf`、`encoding`、`bot_check`、`http_status`、`redirects`、`connect`、`unreadable` | `failed` | 网站没给出可读的内容（太大、太慢、不是文字、是 PDF、编码不认识、要人机验证、非 2xx、重定向太多、连不上、提取不出文字） |
@@ -135,11 +143,49 @@ tenants:
 | 所有读取 `too_slow` 或 `connect`，搜索正常 | 出口策略没放行 80 / 443（被策略丢弃的连接等不到响应，表现为 `too_slow`），或 CNI 不执行 NetworkPolicy 之外的东西挡了 | 确认 CNI 执行策略；节点是否能出站 |
 | 读内网的页面一律被拒 | 这是设计：发布的出口规则和服务都排除私网地址。验收里的测试源站靠测试专用的策略与 `IDP_WEB_TEST_ORIGINS`，生产里不要照做 | 内部资料不走这个组件 |
 | `ref_malformed` 突然很多 | `ref` 密钥换了而没留旧行，或服务重启后换了密钥 | 第 5 节 |
-| 编号 `[n]` 在重启后从 1 开始 | 编号在内存里、按副本（D19） | 预期 |
+| 编号 `[n]` 在重启后从 1 开始 | 没有配置数据库：编号在内存里、按副本（D19）；配置了数据库则不会，除非那个调用者已经一小时没用 | 预期 / 第 9 节 |
+| 日志 `IDP_WEB_TENANTS_FILE: … set dailySearches or dailyReads, which needs the database` | 租户文件里有限额而没有配置数据库 | 设 `IDP_WEB_DATABASE_URL_FILE`，或去掉限额 |
+| 日志 `schema at version 0, binary needs 1 (run idp-web migrate)` / `schema not migrated` | 迁移没跑，或镜像比库新 | 先跑 Job `idp-web-migrate`，再滚动 Deployment |
+| 日志 `refusing to run as a superuser or BYPASSRLS role` | 服务的 URL 用的是所有者或超级用户 | 用 `ensure-login` 建的登录角色 |
+| `/readyz` 503 `database not reachable` | 数据库不应答（超时 `IDP_WEB_DATABASE_TIMEOUT_MS`），或出口策略 `web-database` 的选择器与你的 PostgreSQL 不符 | 第 9 节；有限额的租户此时的调用被拒绝，其余租户的搜索与读取也做不了 |
 
 ## 8. 安全边界（运维要知道的）
 
 - 网络策略加服务自己的地址规则是两道独立的拒绝：不要为了"让它读内网"去放宽任何一道。
 - `openUrl`、域名名单、搜索服务商是三个影响数据外流的开关，改它们要有评审。
-- 阶段 1 的差距：每次运行的调用上限做不到（调用者断言里没有运行号），按调用者限流，每次运行的上限由 HOST 的步数限制兜底；编号、限流与缓存在内存里，按副本（ADR-0001 D19、D22）。
+- 差距：每次运行的调用上限做不到（调用者断言里没有运行号），按调用者限流，每次运行的上限由 HOST 的步数限制兜底；滑动窗口与缓存在内存里、按副本（D21、D22），编号与每日配额在数据库里（D28、D29）。
 - 只在 kind + Calico 上由平台验收测过（PATH M 与 N，页面是集群里的测试源站）；没有真实的公网流量走过 Kubernetes 上的出口规则，也没有在真实的搜索服务商上跑过。
+
+## 9. 数据库、每日配额与副本
+
+idp-web 用 PostgreSQL 保存两样东西：每个租户每个 UTC 日的搜索与读取次数（每日配额，D28），和每个调用者看到的来源编号（D29）。表里只有计数、号码和调用者与地址的 SHA-256；**没有查询词、地址、页面、调用者的主体**。没有配置数据库时（清单之外的部署）编号在内存里、只能单副本，租户文件里不能写每日限额。
+
+**建库与角色**（一次；与 idp-mcp、idp-host 同一套做法）。数据库 `idp_web` 由 DBA 建，所有者角色（建表的）的 URL 放进 Secret `idp-web-database-owner` 的 `owner-url`，只有 Job 挂它。然后：
+
+```bash
+kubectl -n idp-web create secret generic idp-web-database-owner --from-literal=owner-url='postgres://idp_web_owner:<密码>@postgresql.databases.svc.cluster.local:5432/idp_web?sslmode=verify-full'
+kubectl apply -k deploy/kubernetes          # Job idp-web-migrate 建表与角色 idp_web_app；这时 Deployment 还起不来（没有服务角色的 Secret），这是预期
+# 建服务用的登录角色（idp_web_app 的成员，不是超级用户）：用同一个镜像，一次性运行
+kubectl -n idp-web run idp-web-ensure-login --rm -it --restart=Never --image=<镜像> \
+  --env=IDP_WEB_MIGRATION_DATABASE_URL=<所有者的 URL> --env=IDP_WEB_APP_DB_PASSWORD=<服务角色的密码> \
+  --command -- /idp-web ensure-login idp_web_svc
+kubectl -n idp-web create secret generic idp-web-database \
+  --from-literal=service-url='postgres://idp_web_svc:<密码>@postgresql.databases.svc.cluster.local:5432/idp_web?sslmode=verify-full&sslrootcert=/etc/idp/database/ca.crt' \
+  --from-file=ca.crt=<签发数据库服务器证书的 CA>
+```
+
+（那条一次性命令把密码放在命令行里，只在受控的终端上做，或改用一个临时的、挂 Secret 的 Pod。）**TLS**：选项都在 URL 里：`sslmode=verify-full`（服务器证书必须由 `sslrootcert` 指的 CA 签发，且名字要对）；镜像没有系统 CA，所以私有 CA 必须用 `sslrootcert`，公共 CA 由内置的 Mozilla 根兜底。`sslmode=disable` 只用于本机测试。
+
+**升级**：先跑迁移的 Job（它只往前走；服务在库的版本与它需要的不一致时拒绝启动，所以顺序是 Job 先、Deployment 后；Job 的模板建好后不能改，要先删旧的 Job）。库的版本与二进制要求的必须相等，所以滚动更新的那几秒里，已迁移的库会让旧 Pod 重启时起不来：有迁移的版本，先迁移、再滚动，期间不要重启旧 Pod；目前只有一个迁移。
+
+**副本**：配置了数据库就可以把 `replicas` 调高；两个以上的副本各有自己的读取缓存与滑动窗口，一个调用者在窗口内最多可做 副本数 倍的调用，**每日配额是精确的**。NetworkPolicy 的 `web-database` 放行到 `databases` 命名空间里标签 `app.kubernetes.io/name: postgresql` 的 Pod 的 5432：你的 PostgreSQL 不在那里就改这条的选择器（idp-mcp、idp-host 的清单用同一个），改完 `/readyz` 才会 200。
+
+**数据库不可用时**：有限额的租户的每次搜索与读取被拒绝（`quota_unavailable`，调用没有发出、没有计数）；**配置了数据库的部署里，其余租户的搜索与读取也做不了**（来源编号取不到，`numbering_unavailable`），因为在两个副本之间给不出一致的编号；`/readyz` 503，Pod 退出服务，存活探针不受影响（不会因数据库切换而重启）。数据库回来后无需重启。
+
+**看用量**（所有者或有读权限的角色，库里只有这些）：
+
+```sql
+SELECT tenant, kind, used FROM daily_usage WHERE day = (now() AT TIME ZONE 'utc')::date ORDER BY tenant, kind;
+```
+
+**清理**：每个副本每 10 分钟删除空闲超过一小时的编号表和超过 35 天的配额日，表不会无限增长。要手工把某租户今天的额度归零：`DELETE FROM daily_usage WHERE tenant = '<租户号>' AND day = (now() AT TIME ZONE 'utc')::date;`（改限额则改租户文件并重启，限额是启动时读的）。

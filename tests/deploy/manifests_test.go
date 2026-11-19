@@ -176,8 +176,10 @@ func TestNamespaceIsRestrictedAndOpenToTheGateway(t *testing.T) {
 func TestServiceIsHardenedAndItsSettingsAgreeWithItsMounts(t *testing.T) {
 	m := loadAll(t)
 	dep, svc := m.one(t, "Deployment"), m.one(t, "Service")
-	if get(dep, "spec", "replicas") != 1 || str(dep, "spec", "strategy", "type") != "Recreate" {
-		t.Error("phase 1 is one replica: numbering, cache and limits are per replica (ADR-0001 D19, D21, D22)")
+	// the numbering and the daily quota are in the database (D28, D29), so more than one replica is allowed, and the pods may
+	// overlap during a rollout; the cache and the sliding window are per pod and say so in the file (D21, D22)
+	if r, _ := get(dep, "spec", "replicas").(int); r < 1 || str(dep, "spec", "strategy", "type") != "RollingUpdate" {
+		t.Errorf("replicas %v, strategy %q: with the database the service may be several pods, which overlap while one is replaced", get(dep, "spec", "replicas"), str(dep, "spec", "strategy", "type"))
 	}
 	pod := get(dep, "spec", "template", "spec")
 	if get(pod, "automountServiceAccountToken") != false || get(pod, "enableServiceLinks") != false || get(pod, "hostNetwork") != nil {
@@ -251,9 +253,16 @@ func TestServiceIsHardenedAndItsSettingsAgreeWithItsMounts(t *testing.T) {
 		}
 	}
 	files := map[string]struct{ volume, key string }{
-		"IDP_WEB_REF_KEY_FILE":     {"ref-key", "ref.key"},
-		"IDP_WEB_CALLER_KEYS_FILE": {"gateway-caller-keys", "caller.pub"},
-		"IDP_WEB_TENANTS_FILE":     {"tenants", "tenants.yaml"},
+		"IDP_WEB_REF_KEY_FILE":      {"ref-key", "ref.key"},
+		"IDP_WEB_CALLER_KEYS_FILE":  {"gateway-caller-keys", "caller.pub"},
+		"IDP_WEB_TENANTS_FILE":      {"tenants", "tenants.yaml"},
+		"IDP_WEB_DATABASE_URL_FILE": {"database", "service-url"},
+	}
+	// the URL holds the password: it is a file of a Secret, never a value in the manifest or an environment variable
+	for _, v := range []string{"IDP_WEB_DATABASE_URL", "IDP_WEB_MIGRATION_DATABASE_URL", "IDP_WEB_APP_DB_PASSWORD"} {
+		if _, set := env[v]; set {
+			t.Errorf("%s is in the Deployment's environment: the database URL comes from a mounted Secret", v)
+		}
 	}
 	for v, want := range files {
 		p := env[v]
@@ -264,6 +273,9 @@ func TestServiceIsHardenedAndItsSettingsAgreeWithItsMounts(t *testing.T) {
 	// the secrets and the public key are the operator's: named, not shipped; the tenants file is the one the kustomization generates
 	if str(vols["ref-key"], "secret", "secretName") != "idp-web-ref-key" || str(vols["gateway-caller-keys"], "configMap", "name") != "idp-web-gateway-caller-keys" {
 		t.Errorf("volumes %v", vols)
+	}
+	if str(vols["database"], "secret", "secretName") != "idp-web-database" || get(vols["database"], "secret", "optional") == true {
+		t.Errorf("the database's Secret is idp-web-database and not optional: %v", vols["database"])
 	}
 	if str(vols["search-key"], "secret", "secretName") != "idp-web-search-key" || get(vols["search-key"], "secret", "optional") != true {
 		t.Errorf("the search key's Secret is optional (no provider is chosen as shipped) and named idp-web-search-key: %v", vols["search-key"])
@@ -334,5 +346,69 @@ func TestNoKeyMaterialInTheFiles(t *testing.T) {
 				t.Errorf("%s:%d looks like key material: %s", e.Name(), i+1, line)
 			}
 		}
+	}
+}
+
+// The migration Job (ADR-0001 D28): the owner's URL is its own and only its own; it is as hardened as the service and can
+// reach the database and nothing else.
+func TestTheMigrationJobHoldsTheOwnersURLAndTheServiceNeverDoes(t *testing.T) {
+	m := loadAll(t)
+	job, dep := m.one(t, "Job"), m.one(t, "Deployment")
+	pod := get(job, "spec", "template", "spec")
+	cs := list(pod, "containers")
+	if len(cs) != 1 || str(cs[0], "image") != "idp-web" || strings.Join(strs(list(cs[0], "args")), " ") != "migrate" {
+		t.Fatalf("containers %v", cs)
+	}
+	sc := get(cs[0], "securityContext")
+	if get(pod, "automountServiceAccountToken") != false || get(pod, "securityContext", "runAsNonRoot") != true || get(sc, "allowPrivilegeEscalation") != false ||
+		get(sc, "readOnlyRootFilesystem") != true || strings.Join(strs(list(sc, "capabilities", "drop")), ",") != "ALL" {
+		t.Errorf("the Job is not hardened: %v", pod)
+	}
+	env := envOf(cs[0])
+	if env["IDP_WEB_MIGRATION_DATABASE_URL_FILE"] != "/etc/idp/database-owner/owner-url" || len(list(pod, "volumes")) != 1 ||
+		str(list(pod, "volumes")[0], "secret", "secretName") != "idp-web-database-owner" {
+		t.Errorf("env %v, volumes %v", env, list(pod, "volumes"))
+	}
+	for _, v := range list(get(dep, "spec", "template", "spec"), "volumes") {
+		if str(v, "secret", "secretName") == "idp-web-database-owner" {
+			t.Error("the service mounts the schema owner's credentials: it must run as the least-privilege role")
+		}
+	}
+	if lab, _ := get(job, "spec", "template", "metadata", "labels").(doc); lab["app.kubernetes.io/component"] != "migrate" {
+		t.Errorf("labels %v: the network policy names the Job by its component", lab)
+	}
+}
+
+// What the pods may reach inside the cluster: PostgreSQL, in the databases namespace, port 5432, selected by labels; no
+// address range (the public-address rule excludes every private one, so this is a rule of its own).
+func TestTheDatabaseIsTheOnlyPlaceInTheClusterTheServiceAndTheJobMayReach(t *testing.T) {
+	var p doc
+	for _, np := range loadAll(t).byKind["NetworkPolicy"] {
+		if str(np, "metadata", "name") == "web-database" {
+			p = np
+		}
+	}
+	if p == nil {
+		t.Fatal("no web-database policy")
+	}
+	if got := strs(list(p, "spec", "policyTypes")); len(got) != 1 || got[0] != "Egress" {
+		t.Errorf("policy types %v", got)
+	}
+	sel := list(p, "spec", "podSelector", "matchExpressions")
+	if len(sel) != 1 || strings.Join(strs(list(sel[0], "values")), ",") != "migrate,web" || str(sel[0], "key") != "app.kubernetes.io/component" {
+		t.Errorf("selects %v: the service and the Job", sel)
+	}
+	eg := list(p, "spec", "egress")
+	if len(eg) != 1 || len(list(eg[0], "to")) != 1 || len(list(eg[0], "ports")) != 1 {
+		t.Fatalf("egress %v", eg)
+	}
+	to := list(eg[0], "to")[0]
+	ns, _ := get(to, "namespaceSelector", "matchLabels").(doc)
+	pods, _ := get(to, "podSelector", "matchLabels").(doc)
+	if get(to, "ipBlock") != nil || ns["kubernetes.io/metadata.name"] != "databases" || pods["app.kubernetes.io/name"] != "postgresql" {
+		t.Errorf("peer %v", to)
+	}
+	if port := list(eg[0], "ports")[0]; get(port, "port") != 5432 || str(port, "protocol") != "TCP" {
+		t.Errorf("port %v", port)
 	}
 }

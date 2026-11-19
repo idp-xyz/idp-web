@@ -110,3 +110,30 @@ spec:
       ports:
         - {protocol: TCP, port: 443}
         - {protocol: TCP, port: 80}
+---
+# Out, to the database: PostgreSQL in the databases namespace on 5432, and nothing else of the cluster. The public-address rule
+# above excludes every private range, so the database needs a rule of its own; this one names the pods, not an address. Adjust
+# the selectors to where your PostgreSQL runs (the idp-mcp and idp-host manifests use the same). The migrate Job has the same
+# rule and nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-database
+  namespace: idp-web
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [web, migrate]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: databases
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - {protocol: TCP, port: 5432}

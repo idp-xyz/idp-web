@@ -6,6 +6,11 @@
 #   Secret    idp-web-ref-key            key ref.key: at least 32 bytes, one key a line (`openssl rand -base64 48`)
 #   ConfigMap idp-web-gateway-caller-keys  key caller.pub: the idp-mcp gateway's public key (PEM, P-256)
 #   Secret    idp-web-search-key         the search provider's API key, as the provider below names it (exa.key or brave.key)
+#   Secret    idp-web-database           service-url: the URL of the service's login role (postgres://idp_web_svc:...@host:5432/idp_web
+#                                        ?sslmode=verify-full&sslrootcert=/etc/idp/database/ca.crt), and ca.crt: the CA of the server
+#   Secret    idp-web-database-owner     owner-url: the schema owner's URL, for the Job idp-web-migrate only
+# and the database itself: created, migrated (the Job idp-web-migrate) and given its login role (`idp-web ensure-login`) before
+# the Deployment starts (docs/RUNBOOK.md 9);
 # and the search provider: IDP_WEB_PROVIDER is deliberately not set here (web.yaml), so the pod does not start until the
 # operator chooses one.
 #
@@ -15,6 +20,7 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - web.yaml
+  - migrate-job.yaml
   - networkpolicy.yaml
 # the tenants file, named by its content: a change replaces the pod, which reads the file once at start
 configMapGenerator:

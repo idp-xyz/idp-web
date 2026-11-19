@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 
 	"idp-web/internal/refs"
 	"idp-web/internal/search"
+	"idp-web/internal/state"
 	"idp-web/internal/tenants"
 	"idp-web/internal/tools"
 )
@@ -25,6 +27,16 @@ type setup struct {
 	keys         *refs.Keys
 	tenants      *tenants.Set
 	limits       tools.Limits
+	// store is the database of the daily quotas and the source numbers (ADR-0001 D28, D29); nil when none is configured.
+	store *state.Store
+}
+
+// unreachable says whether the database is configured and does not answer within its timeout, for /readyz.
+func (s *setup) unreachable() bool {
+	if s == nil || s.store == nil {
+		return false
+	}
+	return s.store.Ping(context.Background()) != nil
 }
 
 // missing names what is not loaded, for /readyz.
@@ -67,6 +79,19 @@ func positive(getenv func(string) string, name string, def int) (int, error) {
 		return 0, fmt.Errorf("%s must be a positive whole number, not %q", name, v)
 	}
 	return n, nil
+}
+
+// secret reads a setting that may hold a password: from the environment variable name, or from the file that
+// name+"_FILE" names (a Kubernetes Secret mounted as a file), not both. It returns "" when neither is set.
+func secret(getenv func(string) string, name string) (string, error) {
+	v, file := getenv(name), getenv(name+"_FILE")
+	switch {
+	case v != "" && file != "":
+		return "", fmt.Errorf("%s and %s_FILE are both set: set one", name, name)
+	case file != "":
+		return readSecret(name+"_FILE", file)
+	}
+	return v, nil
 }
 
 // loadSetup reads the settings of the search service, the ref keys, the tenants and the limits from the environment.
@@ -119,6 +144,25 @@ func loadSetup(getenv func(string) string, log *slog.Logger) (*setup, error) {
 		}
 	default:
 		return nil, fmt.Errorf("IDP_WEB_PROVIDER %q is not fixture, exa or brave", s.providerName)
+	}
+	url, err := secret(getenv, "IDP_WEB_DATABASE_URL")
+	if err != nil {
+		return nil, err
+	}
+	if limited := s.tenants.DailyLimited(); url == "" && len(limited) > 0 {
+		// A limit that cannot be counted is no limit: refuse to start rather than run without one (ADR-0001 D28).
+		return nil, fmt.Errorf("IDP_WEB_TENANTS_FILE: %s set dailySearches or dailyReads, which needs the database that keeps the count: set IDP_WEB_DATABASE_URL (or IDP_WEB_DATABASE_URL_FILE), or remove the limits", strings.Join(limited, ", "))
+	}
+	if url != "" {
+		ms, err := positive(getenv, "IDP_WEB_DATABASE_TIMEOUT_MS", int(state.DefaultTimeout/time.Millisecond))
+		if err != nil {
+			return nil, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if s.store, err = state.Open(ctx, url, state.Options{Timeout: time.Duration(ms) * time.Millisecond}); err != nil {
+			return nil, fmt.Errorf("IDP_WEB_DATABASE_URL: %w", err)
+		}
 	}
 	d := tools.DefaultLimits
 	if s.limits.Searches, err = positive(getenv, "IDP_WEB_LIMIT_SEARCHES", d.Searches); err != nil {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"golang.org/x/net/idna"
@@ -32,14 +33,62 @@ type Policy struct {
 	ExcludeDomains []string
 	// OpenURL allows web_open_url. Off unless the file says so (appendix C 2 item 2).
 	OpenURL bool
+	// DailySearches and DailyReads are how many searches and page reads that go out to the web the tenant may make in a UTC
+	// day (ADR-0001 D28). nil means no limit, and then the database is not asked; 0 means none at all. Use Daily.
+	DailySearches, DailyReads *int
 }
+
+// Daily returns the tenant's limit for the kind ("searches" or "reads") and whether there is one.
+func (p Policy) Daily(kind string) (limit int, limited bool) {
+	var l *int
+	switch kind {
+	case "searches":
+		l = p.DailySearches
+	case "reads":
+		l = p.DailyReads
+	}
+	if l == nil {
+		return 0, false
+	}
+	return *l, true
+}
+
+// MaxDaily is the largest daily limit the file may name: it is stored in a 32-bit column, and a limit this high is no
+// limit in practice, which is what leaving the setting out says.
+const MaxDaily = 1_000_000_000
 
 // rawPolicy is the file's form of a Policy.
 type rawPolicy struct {
-	Enabled        bool     `yaml:"enabled"`
-	IncludeDomains []string `yaml:"includeDomains"`
-	ExcludeDomains []string `yaml:"excludeDomains"`
-	OpenURL        bool     `yaml:"openUrl"`
+	Enabled        bool         `yaml:"enabled"`
+	IncludeDomains []string     `yaml:"includeDomains"`
+	ExcludeDomains []string     `yaml:"excludeDomains"`
+	OpenURL        bool         `yaml:"openUrl"`
+	DailySearches  *wholeNumber `yaml:"dailySearches"`
+	DailyReads     *wholeNumber `yaml:"dailyReads"`
+}
+
+// wholeNumber is a number in the file that must be written as a whole number: yaml.v3 would read 1.5 into an int as 1, and
+// a limit that quietly becomes another one is worse than an error.
+type wholeNumber int
+
+func (w *wholeNumber) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.ScalarNode || n.Tag != "!!int" {
+		return fmt.Errorf("line %d: %q is not a whole number (a daily limit is a whole number from 0 to %d; leave it out for no limit)", n.Line, n.Value, MaxDaily)
+	}
+	var v int
+	if err := n.Decode(&v); err != nil {
+		return fmt.Errorf("line %d: %q is not a whole number that fits", n.Line, n.Value)
+	}
+	*w = wholeNumber(v)
+	return nil
+}
+
+func (w *wholeNumber) ptr() *int {
+	if w == nil {
+		return nil
+	}
+	v := int(*w)
+	return &v
 }
 
 type rawFile struct {
@@ -93,7 +142,15 @@ func Parse(b []byte) (*Set, error) {
 }
 
 func (r rawPolicy) policy() (Policy, error) {
-	p := Policy{Enabled: r.Enabled, OpenURL: r.OpenURL}
+	p := Policy{Enabled: r.Enabled, OpenURL: r.OpenURL, DailySearches: r.DailySearches.ptr(), DailyReads: r.DailyReads.ptr()}
+	for _, f := range []struct {
+		name string
+		l    *int
+	}{{"dailySearches", p.DailySearches}, {"dailyReads", p.DailyReads}} {
+		if f.l != nil && (*f.l < 0 || *f.l > MaxDaily) {
+			return p, fmt.Errorf("%s must be a whole number from 0 to %d (0 allows none), not %d; leave it out for no limit", f.name, MaxDaily, *f.l)
+		}
+	}
 	var err error
 	if p.IncludeDomains, err = normalize(r.IncludeDomains); err != nil {
 		return p, fmt.Errorf("includeDomains: %w", err)
@@ -129,6 +186,23 @@ func (s *Set) For(tenant string) Policy {
 		return p
 	}
 	return s.def
+}
+
+// DailyLimited names the entries of the file that set a daily limit ("default" for the default), sorted: a deployment with
+// any needs the database (ADR-0001 D28), and the service refuses to start without one.
+func (s *Set) DailyLimited() []string {
+	var out []string
+	set := func(p Policy) bool { return p.DailySearches != nil || p.DailyReads != nil }
+	if set(s.def) {
+		out = append(out, "default")
+	}
+	for id, p := range s.tenants {
+		if set(p) {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Count is the number of tenants named in the file.

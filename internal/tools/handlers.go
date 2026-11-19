@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"idp-web/internal/addr"
@@ -14,6 +15,7 @@ import (
 	"idp-web/internal/fetch"
 	"idp-web/internal/mcp"
 	"idp-web/internal/search"
+	"idp-web/internal/state"
 	"idp-web/internal/tenants"
 )
 
@@ -61,6 +63,11 @@ func (a *api) search(ctx context.Context, caller mcp.Caller, args map[string]jso
 	if wait := a.limits.allow(caller.Owner(), "searches"); wait > 0 {
 		return a.fail(tool, au, &rateLimited{"searches", wait})
 	}
+	// From here the provider is called, and a search counts from this point whatever the provider answers: an error, a
+	// timeout and a cancelled call all cost what a call costs (ADR-0001 D28).
+	if _, err := a.take(ctx, pol, caller, state.Searches, "searches"); err != nil {
+		return a.fail(tool, au, err)
+	}
 	count := defaultCount
 	if in.Count != nil {
 		count = *in.Count
@@ -70,8 +77,9 @@ func (a *api) search(ctx context.Context, caller mcp.Caller, args map[string]jso
 	if err != nil {
 		return a.fail(tool, au, err)
 	}
-	var blocks []string
-	cites := []citation{}
+	type kept struct{ title, url string }
+	var keep []kept
+	var keepResults []search.Result
 	seen := map[string]bool{}
 	for _, r := range found {
 		// Every result passes the address rules and the tenant's lists before it gets a ref (ADR-0001 D20): a result
@@ -89,15 +97,32 @@ func (a *api) search(ctx context.Context, caller mcp.Caller, args map[string]jso
 			continue
 		}
 		seen[u] = true
-		if len(cites) == count {
+		if len(keep) == count {
 			break
 		}
-		n := a.sources.number(caller.Owner(), u)
 		title := r.Title
 		if title == "" {
 			title = u
 		}
-		b := fmt.Sprintf("[%d] %s\naddress: %s\nref: %s", n, title, u, a.cfg.Keys.Make(caller.Owner(), u))
+		keep = append(keep, kept{title, u})
+		keepResults = append(keepResults, r)
+	}
+	// the numbers of all the addresses at once, in the order they are listed (one round trip to the database)
+	addrs := make([]string, len(keep))
+	for i, k := range keep {
+		addrs[i] = k.url
+	}
+	nums, err := a.numbers.Number(ctx, caller.Owner(), addrs, a.cfg.Now())
+	if err != nil {
+		a.log.Error("numbering the sources failed", "err", err)
+		return a.fail(tool, au, ErrNumberingUnavailable)
+	}
+	var blocks []string
+	cites := []citation{}
+	for i, k := range keep {
+		r := keepResults[i]
+		n := nums[i]
+		b := fmt.Sprintf("[%d] %s\naddress: %s\nref: %s", n, k.title, k.url, a.cfg.Keys.Make(caller.Owner(), k.url))
 		if r.Published != "" {
 			b += "\npublished: " + r.Published
 		}
@@ -105,7 +130,7 @@ func (a *api) search(ctx context.Context, caller mcp.Caller, args map[string]jso
 			b += "\nexcerpt: " + r.Snippet
 		}
 		blocks = append(blocks, b)
-		cites = append(cites, citation{N: n, Title: title, URL: u})
+		cites = append(cites, citation{N: n, Title: k.title, URL: k.url})
 	}
 	au.results = len(cites)
 	text := "no results"
@@ -194,8 +219,21 @@ func (a *api) read(ctx context.Context, tool string, caller mcp.Caller, pol tena
 		if wait := a.limits.allow(caller.Owner(), "reads"); wait > 0 {
 			return a.fail(tool, au, &rateLimited{"page reads", wait})
 		}
-		page, err := a.cfg.Reader.Read(fetch.WithAllow(ctx, pol.AllowHost), u)
+		// The unit is taken before the read and given back if the read never sent anything: the reader says when it is about
+		// to connect to an address that passed the address rules (fetch.WithDialed). So a read that fails after that (the
+		// site is down, too slow, robots.txt says no, a redirect to a private address after the first request went out)
+		// counts, and one refused before it connected (the address resolves inside, a name that does not resolve) does not.
+		release, err := a.take(ctx, pol, caller, state.Reads, "page reads")
 		if err != nil {
+			return a.fail(tool, au, err)
+		}
+		var dialed atomic.Bool
+		rctx := fetch.WithDialed(fetch.WithAllow(ctx, pol.AllowHost), func() { dialed.Store(true) })
+		page, err := a.cfg.Reader.Read(rctx, u)
+		if err != nil {
+			if !dialed.Load() {
+				release()
+			}
 			return a.fail(tool, au, err)
 		}
 		c = cached{page: page, fetchedAt: a.cfg.Now().UTC()}
@@ -203,7 +241,12 @@ func (a *api) read(ctx context.Context, tool string, caller mcp.Caller, pol tena
 	}
 	part, next, total := extract.Page(c.page.Text, offset, 0)
 	au.bytes = len(part)
-	n := a.sources.number(caller.Owner(), u)
+	nums, err := a.numbers.Number(ctx, caller.Owner(), []string{u}, a.cfg.Now())
+	if err != nil {
+		a.log.Error("numbering the sources failed", "err", err)
+		return a.fail(tool, au, ErrNumberingUnavailable)
+	}
+	n := nums[0]
 	title := strings.Join(strings.Fields(c.page.Title), " ")
 	if title == "" {
 		title = c.page.FinalURL

@@ -1,8 +1,13 @@
-# The idp-web service. ONE replica, and phase 1 is built for that: the numbers [n] a caller sees, the read cache and the rate
-# limits are in memory and per replica (ADR-0001 D19, D21, D22), so a second replica would give the same caller two
-# numberings and two budgets. The strategy is Recreate for the same reason: no moment with two pods. Refs are signed with a
-# key and verified by any pod that has it, so a ref outlives a restart; the numbering does not (the member's run is told
-# to search again).
+# The idp-web service. It keeps its daily quotas and the numbers [n] of the sources a caller has been shown in PostgreSQL
+# (ADR-0001 D28, D29), so it may run as MORE THAN ONE replica, as long as the database is configured, which as shipped it is
+# (the Secret idp-web-database below): the count and the numbering are the database's, the same for every pod and across
+# restarts. What is still per pod: the read cache (performance only, D21) and the sliding-window rate limit (D22): with N
+# replicas a caller can make up to N times the window's calls, and the daily quota is the exact bound. Nothing else forbids
+# more than one replica; `replicas` is left at 1 for the operator to raise. RollingUpdate, because two pods at the same time are
+# no longer a problem (it was one of the reasons for Recreate before the database).
+# Without a database (no IDP_WEB_DATABASE_URL_FILE, not what this file ships) the numbering is in memory and per pod, no
+# daily limit can be set, and the service must be ONE replica with strategy Recreate: two pods would give the same caller two
+# numberings.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,9 +16,10 @@ metadata:
   labels:
     app.kubernetes.io/component: web
 spec:
-  replicas: 1
+  replicas: 1                                    # more than one is fine with the database (see above)
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
   selector:
     matchLabels:
       app.kubernetes.io/component: web
@@ -56,6 +62,13 @@ spec:
               value: /etc/idp/ref/ref.key
             - name: IDP_WEB_TENANTS_FILE
               value: /etc/idp/tenants/tenants.yaml
+            # The database of the daily quotas and the source numbers. The Secret idp-web-database (the operator's) holds the
+            # URL of the service's login role, a member of idp_web_app and never a superuser, as service-url, and the CA that
+            # signed the server's certificate as ca.crt. TLS is the URL's: sslmode=verify-full&sslrootcert=/etc/idp/database/ca.crt
+            # (docs/RUNBOOK.md 9). The schema is prepared by the Job idp-web-migrate first; idp-web refuses to start on a schema
+            # that is not at the version it needs.
+            - name: IDP_WEB_DATABASE_URL_FILE
+              value: /etc/idp/database/service-url
             # THE SEARCH PROVIDER IS THE OPERATOR'S CHOICE and is not set here. It decides who is sent every query the agents make
             # (platform ADR-0003 D3), in which region, under whose terms, at what price: not a default to ship. Without it the
             # service exits at start with status 2 and says why, and the pod stays unready: it fails closed. Add one of
@@ -73,7 +86,7 @@ spec:
             # if it is in these files.
           readinessProbe:
             httpGet:
-              path: /readyz        # 200 only when the provider, the ref key and the tenants file are loaded
+              path: /readyz        # 200 only when the provider, the ref key and the tenants file are loaded and the database answers
               port: ops
             periodSeconds: 10
           livenessProbe:
@@ -94,6 +107,7 @@ spec:
             - {name: gateway-caller-keys, mountPath: /etc/idp/gateway, readOnly: true}
             - {name: tenants, mountPath: /etc/idp/tenants, readOnly: true}
             - {name: search-key, mountPath: /etc/idp/search, readOnly: true}
+            - {name: database, mountPath: /etc/idp/database, readOnly: true}
       volumes:
         - name: ref-key
           secret:
@@ -108,6 +122,9 @@ spec:
           secret:
             secretName: idp-web-search-key            # created by the operator, with the provider's key
             optional: true                            # absent until a provider is chosen: the missing provider is the error to see
+        - name: database
+          secret:
+            secretName: idp-web-database              # created by the operator: service-url and ca.crt
 ---
 apiVersion: v1
 kind: Service
