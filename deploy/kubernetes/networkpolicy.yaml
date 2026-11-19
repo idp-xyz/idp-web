@@ -1,0 +1,112 @@
+# Default deny, then exactly the flows needed. idp-web has no authentication of its own for the network (the gateway's
+# signature over the caller is the identity, ADR-0001 D2, but anything that can reach the port can ask for the tool list and
+# can try a call), so these policies are part of the boundary.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: idp-web
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: idp-web
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+# In: the MCP port from the idp-mcp gateway, which makes the calls, and from the idp-mcp registry, which discovers the tools
+# (tools/list, and a connection test when a server is registered): without the second, registering idp-web at the gateway
+# fails, so it is part of this component's contract and is admitted here rather than in the platform overlay (the sandbox's
+# manifests leave it to the overlay's `sandbox-registry`; deploy/kubernetes/full does not need one for idp-web). The registry can
+# list tools and cannot call one: a tools/call without the gateway's signature is refused (403) by the service itself.
+# The ops port (/metrics) from the observability namespace; the kubelet's probes are not subject to NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-ingress
+  namespace: idp-web
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: web
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: idp-mcp
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: gateway
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: idp-mcp
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: registry
+      ports:
+        - {protocol: TCP, port: 8580}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - {protocol: TCP, port: 9580}
+---
+# Out: to public addresses on 443 and 80 (pages, the search provider's API). The service itself refuses every address the
+# IANA special-purpose registries mark as not globally reachable (private, loopback, link-local, metadata, CGNAT,
+# documentation, benchmarking, reserved, multicast: ADR-0001 D6, internal/addr); the excepts below are its IPv4 part, and
+# tests/deploy compares the two over the whole IPv4 space. This is the same refusal made by the cluster, so that a bug or a
+# misconfiguration of the service (or a DNS answer that slips through) does not open the cluster or the operator's network.
+# If the cluster's pod, service or node addresses are not in the ranges excluded below, add them.
+# IPv4 only: with no IPv6 rule the service reaches no IPv6 address (it then uses a host's IPv4 one); a cluster that needs
+# IPv6 destinations adds an ipBlock for ::/0 except fc00::/7, fe80::/10, ff00::/8 and its own ranges.
+# Nothing else leaves the pod: not the Kubernetes API, not another namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-egress
+  namespace: idp-web
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: web
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.0.2.0/24
+              - 192.88.99.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 198.51.100.0/24
+              - 203.0.113.0/24
+              - 224.0.0.0/3                  # multicast and 240.0.0.0/4, with 255.255.255.255
+      ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 80}

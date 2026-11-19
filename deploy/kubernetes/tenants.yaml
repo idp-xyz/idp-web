@@ -1,0 +1,14 @@
+# Which tenants may use the web tools (idp-web ADR-0001 D18). As shipped NOBODY may: a tenant that is not listed gets
+# the default, and the default is off, so an operator who applies these manifests unread opens nothing. An operator
+# enables a tenant by naming it (the tenant id the gateway forwards), for example:
+#
+#   tenants:
+#     7b0c0a52-0000-0000-0000-000000000000:
+#       enabled: true
+#       includeDomains: [example.com]          # empty or absent: every public domain
+#       excludeDomains: [private.example.com]  # wins over includeDomains
+#       openUrl: false                         # web_open_url, for addresses the member gives (the HOST asks them first)
+#
+# Then apply again with `kubectl apply -k`: the ConfigMap's name changes with its content and the pod is replaced,
+# which is how the file is read (once, at start).
+default: {enabled: false}

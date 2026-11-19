@@ -2,7 +2,7 @@
 
 IDP TELOS 的联网组件：一个 MCP 服务器，让 Agent 搜索网页、读取网页内容。它放在 idp-mcp 网关后面作为上游：认证、授权、参数校验和调用审计都是网关的事；idp-web 只接受网关签了名的调用者。整体设计见平台仓库的 ADR-0003（网页搜索与读取），本仓库自己的决策见 [`docs/adr/ADR-0001-web-design.md`](docs/adr/ADR-0001-web-design.md)。
 
-状态：**三个工具可用**。MCP 服务、调用者校验、地址检查与读取、正文提取、搜索适配器（`exa`、`brave`、`fixture`）、签名的 `ref`、租户文件、限流、读取缓存、审计、指标、镜像和 CI 都已具备。设计决策见 ADR-0001（D1 到 D25）。
+状态：**三个工具可用**。MCP 服务、调用者校验、地址检查与读取、正文提取、搜索适配器（`exa`、`brave`、`fixture`）、签名的 `ref`、租户文件、限流、读取缓存、审计、指标、镜像、CI 和 Kubernetes 清单都已具备。设计决策见 ADR-0001（D1 到 D26）。运维见 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)。
 
 ## 工具
 
@@ -25,6 +25,10 @@ bash deploy/build.sh    # 镜像（scratch，用户 65532）：宿主上静态�
 ```
 
 运行：见下面"本机用 fixture 运行"。配置项见 `cmd/idp-web/main.go` 文件头与下表。绑定非回环地址必须设置 `IDP_WEB_PRIVATE_NETWORK=true`：服务器自己没有认证，只有网关能到达它。
+
+## 在 Kubernetes 上
+
+`deploy/kubernetes`（命名空间 `idp-web`，一个副本，restricted，默认拒绝的 NetworkPolicy，出口只到公网地址的 443 与 80）：`kubectl apply -k deploy/kubernetes`，之前要先建 `ref` 密钥、网关公钥和搜索服务的密钥，并选搜索服务，步骤见 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)。发布的租户文件里谁也不能用，发布的清单里没有搜索服务的默认值（没选就不启动）。在 idp-mcp 里登记的端点，也就是 `IDP_WEB_CALLER_AUDIENCE`，在 Kubernetes 上是 Service 的地址：`http://idp-web.idp-web.svc.cluster.local:8580/mcp`。清单由 `tests/deploy` 检查（与代码一致、没有测试专用的东西、出口规则与 `internal/addr` 一致），整平台的验收是 idp-telos-go 的 `tests/kind/full.sh`（PATH M 与 N）。
 
 ## 配置
 

@@ -1,0 +1,10 @@
+# idp-web has a namespace of its own: it is the one component whose pods are allowed to open connections to the public
+# internet, and nothing else lives in it, so that the egress rule of networkpolicy.yaml cannot be inherited by anything else.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: idp-web
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    idp-mcp/mcp-upstream: "true"      # the idp-mcp gateway (and registry) may reach upstreams in namespaces carrying this label

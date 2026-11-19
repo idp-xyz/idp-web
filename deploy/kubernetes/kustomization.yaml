@@ -1,0 +1,32 @@
+# idp-web on Kubernetes. NOT YET APPLIED TO A REAL CLUSTER: tests/deploy keeps these manifests consistent with each other and
+# with the code (names, ports, mounts, hardening, the egress rule against internal/addr), and the platform's kind run
+# (idp-telos-go tests/kind/full.sh, PATH M and N) applies them under Calico.
+#
+# What the operator creates before applying (none of it is in this repository; ADR-0001 D26 and docs/RUNBOOK.md):
+#   Secret    idp-web-ref-key            key ref.key: at least 32 bytes, one key a line (`openssl rand -base64 48`)
+#   ConfigMap idp-web-gateway-caller-keys  key caller.pub: the idp-mcp gateway's public key (PEM, P-256)
+#   Secret    idp-web-search-key         the search provider's API key, as the provider below names it (exa.key or brave.key)
+# and the search provider: IDP_WEB_PROVIDER is deliberately not set here (web.yaml), so the pod does not start until the
+# operator chooses one.
+#
+# No commonLabels: it would rewrite the NetworkPolicy peers that select other namespaces' pods (the gateway, kube-dns).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - web.yaml
+  - networkpolicy.yaml
+# the tenants file, named by its content: a change replaces the pod, which reads the file once at start
+configMapGenerator:
+  - name: idp-web-tenants
+    namespace: idp-web
+    files: [tenants.yaml]
+labels:
+  - pairs:
+      app.kubernetes.io/name: idp-web
+      app.kubernetes.io/part-of: idp-telos
+    includeTemplates: true
+images:
+  - name: idp-web
+    newName: registry.example.com/idp/idp-web    # set to the image built by deploy/build.sh, pinned by digest
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

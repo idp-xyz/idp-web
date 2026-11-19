@@ -7,6 +7,7 @@ build:
 vet:
 	gofmt -l . | (! grep .) && go vet ./...
 
+# ./... includes tests/deploy: the Kubernetes manifests against the code (the egress policy against internal/addr)
 test: vet
 	go test -race ./...
 
