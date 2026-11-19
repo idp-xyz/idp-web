@@ -25,6 +25,7 @@ import (
 
 	"idp-web/internal/addr"
 	"idp-web/internal/extract"
+	"idp-web/internal/pdfread"
 )
 
 // The limits of one read (platform ADR-0003 D4; ADR-0001 D9).
@@ -41,12 +42,19 @@ const (
 // service looks like inside (resolved addresses, dial errors): that goes to the log. A caller tests them with
 // errors.Is; the message of a returned error may add what the model needs (the status, the content type).
 var (
-	ErrNotPublic        = addr.ErrNotPublic
-	ErrRobots           = errors.New("the site's robots.txt does not allow reading this page")
-	ErrTooLarge         = errors.New("the page is larger than 5 MiB")
-	ErrTooSlow          = errors.New("the site did not deliver the page within 15 seconds")
-	ErrType             = errors.New("the content type is not read")
-	ErrPDF              = errors.New("the page is a PDF, which is not supported yet")
+	ErrNotPublic = addr.ErrNotPublic
+	ErrRobots    = errors.New("the site's robots.txt does not allow reading this page")
+	ErrTooLarge  = errors.New("the page is larger than 5 MiB")
+	ErrTooSlow   = errors.New("the site did not deliver the page within 15 seconds")
+	ErrType      = errors.New("the content type is not read")
+	// The PDF reader's errors (ADR-0001 D31): the same values, so that errors.Is works across the packages.
+	ErrPDFNoText        = pdfread.ErrNoTextLayer
+	ErrPDFEncrypted     = pdfread.ErrEncrypted
+	ErrPDFMalformed     = pdfread.ErrMalformed
+	ErrPDFTooLarge      = pdfread.ErrTooLarge
+	ErrPDFTooSlow       = pdfread.ErrTooSlow
+	ErrPDFUnavailable   = pdfread.ErrUnavailable
+	ErrPDFBusy          = pdfread.ErrBusy
 	ErrEncoding         = errors.New("the content encoding is not read")
 	ErrBotCheck         = errors.New("the site answered with a bot check instead of the page")
 	ErrNeedsScript      = errors.New("the content of this page is produced by script and cannot be read now")
@@ -76,7 +84,15 @@ type Page struct {
 	Text     string // the main text as Markdown
 	Bytes    int    // the decoded body, before extraction
 	Type     string // the media type of the answer
-	Engine   string // what produced Text: an engine of internal/extract
+	Engine   string // what produced Text: an engine of internal/extract, or "pdf"
+	// For a PDF: its pages and how many of them Text holds (the first ones; a long document is cut, ADR-0001 D31).
+	Pages, PagesRead int
+}
+
+// PDFReader reads a PDF that was downloaded: internal/pdfread's Runner, which does it in a process of its own. A nil
+// reader means PDFs are not read, and a PDF is answered with ErrPDFUnavailable.
+type PDFReader interface {
+	Read(ctx context.Context, pdf []byte) (pdfread.Output, error)
 }
 
 // Resolver is the part of net.Resolver the reader uses; tests replace it.
@@ -102,6 +118,8 @@ type Config struct {
 	Engine string
 	// RootCAs replaces the system roots, for tests with a certificate of their own.
 	RootCAs *x509.CertPool
+	// PDF reads the PDFs; nil: reading PDFs is not available (ADR-0001 D31).
+	PDF PDFReader
 }
 
 // Reader reads pages. It is safe for concurrent use.

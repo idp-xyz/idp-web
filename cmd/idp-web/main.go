@@ -238,11 +238,15 @@ func main() {
 	if cfg.store != nil {
 		st = cfg.store
 	}
-	log.Info("configured", "provider", cfg.providerName, "tenants", cfg.tenants.Count(), "database", cfg.store != nil, "dailyLimited", len(cfg.tenants.DailyLimited()), "searches", cfg.limits.Searches, "reads", cfg.limits.Reads, "windowSeconds", int(cfg.limits.Window.Seconds()))
+	pdf, err := startPDFReader(os.Getenv, log)
+	if err != nil {
+		fatal(err)
+	}
+	log.Info("configured", "pdf", pdf != nil, "provider", cfg.providerName, "tenants", cfg.tenants.Count(), "database", cfg.store != nil, "dailyLimited", len(cfg.tenants.DailyLimited()), "searches", cfg.limits.Searches, "reads", cfg.limits.Reads, "windowSeconds", int(cfg.limits.Window.Seconds()))
 	met := &metrics{counts: map[[2]string]int64{}, nanos: map[string]int64{}, refused: map[[2]string]int64{}, failed: map[[2]string]int64{}}
 	srv := mcp.New("idp-web", version,
 		"Searches the web and reads pages: web_search returns results with a ref, web_fetch reads a result with its ref, web_open_url reads an address the member gave and needs the member's confirmation.",
-		tools.New(tools.Config{Log: log, Metrics: met, RequireCaller: requireCaller, Provider: cfg.provider, Reader: newReader(log, testOrigins),
+		tools.New(tools.Config{Log: log, Metrics: met, RequireCaller: requireCaller, Provider: cfg.provider, Reader: newReader(log, testOrigins, pdf),
 			Keys: cfg.keys, Tenants: cfg.tenants, State: st, TestOrigins: testOrigins, Limits: cfg.limits}))
 	srv.Log = log
 

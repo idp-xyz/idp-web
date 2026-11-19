@@ -327,19 +327,13 @@ func TestContentTypesThatAreNotTextAreRefusedWithTheirOwnMessages(t *testing.T) 
 		}
 	}
 	e := newEnv(t, routes{
-		"/pdf":  typed("application/pdf", "%PDF-1.7"),
 		"/zip":  typed("application/zip", "PK\x03\x04"),
 		"/json": typed("application/json", "{}"),
 		"/none": typed("", "\x00\x01\x02\x03binary without a type"),
 		"/xhtml": typed("application/xhtml+xml", `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>X</title></head><body><p>`+
 			strings.Repeat("An xhtml page with words in it, long enough to be a paragraph of the article. ", 3)+`</p></body></html>`),
 	})
-	_, err := e.r.Read(context.Background(), e.url("/pdf"))
-	is(t, err, ErrPDF)
-	if err.Error() != "the page is a PDF, which is not supported yet" {
-		t.Errorf("message %q", err)
-	}
-	_, err = e.r.Read(context.Background(), e.url("/zip"))
+	_, err := e.r.Read(context.Background(), e.url("/zip"))
 	is(t, err, ErrType)
 	if err.Error() != "content type application/zip is not read" {
 		t.Errorf("message %q", err)

@@ -2,7 +2,7 @@
 
 IDP TELOS 的联网组件：一个 MCP 服务器，让 Agent 搜索网页、读取网页内容。它放在 idp-mcp 网关后面作为上游：认证、授权、参数校验和调用审计都是网关的事；idp-web 只接受网关签了名的调用者。整体设计见平台仓库的 ADR-0003（网页搜索与读取），本仓库自己的决策见 [`docs/adr/ADR-0001-web-design.md`](docs/adr/ADR-0001-web-design.md)。
 
-状态：**三个工具可用**。MCP 服务、调用者校验、地址检查与读取、正文提取、搜索适配器（`exa`、`brave`、`fixture`）、签名的 `ref`、租户文件、限流、每日配额与来源编号（PostgreSQL）、读取缓存、审计、指标、镜像、CI 和 Kubernetes 清单都已具备。设计决策见 ADR-0001（D1 到 D26）。运维见 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)。
+状态：**三个工具可用**。MCP 服务、调用者校验、地址检查与读取、正文提取、搜索适配器（`exa`、`brave`、`fixture`）、签名的 `ref`、租户文件、限流、每日配额与来源编号（PostgreSQL）、读取缓存、审计、指标、镜像、CI 和 Kubernetes 清单都已具备。**能读有文字层的 PDF**（D31）。设计决策见 ADR-0001（D1 到 D31）。运维见 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)。
 
 ## 工具
 
@@ -13,6 +13,8 @@ IDP TELOS 的联网组件：一个 MCP 服务器，让 Agent 搜索网页、读�
 | `web_open_url` | `url`、可选 `offset` | 读取成员给的地址；只有租户文件里 `openUrl: true` 的租户可用，确认由 HOST 强制 |
 
 `web_search` 返回编号的结果（`[n] 标题`、`address:`、`ref:`、`published:`、`excerpt:`）和 `structuredContent.citations`（`n`、`title`、`url`）；`web_fetch` 与 `web_open_url` 返回正文的一段（12 KiB），首行写明总长度与位置，`citations` 里有最终地址、读取时间和这一段的 SHA-256。同一个调用者看到的同一个地址总是同一个编号 `n`。
+
+**PDF**：有文字层的 PDF 读成文本，每页前有一行 `[page N]`（模型据此引用页码），首行写明是 PDF 和总页数（`[1] 标题 (PDF, 30 pages; bytes 0–12288 of 80211; …)`）；超过 200 页的只读前 200 页，首行和正文开头都写明。表格按行输出（一行的各个单元格在同一行里，不是 Markdown 表格）。扫描件（没有文字层）、加密的、损坏的 PDF 各有自己的错误句子（`pdf_no_text_layer`、`pdf_encrypted`、`pdf_malformed`，还有 `pdf_too_large`、`pdf_too_slow`、`pdf_busy`、`pdf_reader_unavailable`），都建议换一个来源。**不做**：OCR、需要用户密码的 PDF、表单与附件、从右到左和竖排文字的阅读顺序（D31）。解析在子进程 `idp-web-pdf` 里做，带时间、内存、系统调用的限制，镜像里有两个二进制：`/idp-web` 与 `/idp-web-pdf`。
 
 三个工具都是 `readOnlyHint: true`、`openWorldHint: true`，`additionalProperties: false`。租户和成员只取自网关签名的调用者，不是参数。经网关时名字带上目标名前缀（`web__web_search`）。
 
@@ -44,6 +46,9 @@ CI 里的第三方镜像（扫描用的 trivy）先由 `deploy/pull-image.sh` �
 | `IDP_WEB_METRICS` | `127.0.0.1:9580` | `/healthz`、`/readyz`（服务商、`ref` 密钥、租户文件都载入了才是 200）、`/metrics`（`idp_web_calls_total{tool,outcome}`、`idp_web_refused_total{tool,reason}`、`idp_web_failed_total{tool,reason}`、`idp_web_call_seconds_total{tool}`） |
 | `IDP_WEB_CALLER_KEYS_FILE` | 空 | 网关的公钥（PEM，P-256，可放几把）；设了之后每个 `tools/call` 必须带网关的签名断言 |
 | `IDP_WEB_CALLER_AUDIENCE` | 空 | 本服务在 idp-mcp 里登记的端点，如 `http://web:8580/mcp`；与上一项要么都设、要么都不设 |
+| `IDP_WEB_PDF` | `on` | `off` 关掉 PDF 读取：PDF 一律回答"reading PDFs is not available"（`pdf_reader_unavailable`）；别的值是配置错误 |
+| `IDP_WEB_PDF_READER` | 与 `idp-web` 同目录的 `idp-web-pdf` | PDF 读取程序的路径；启动时用一份内置的小 PDF 试跑一次，找不到、起不来、读不出就当作"PDF 不可用"并在日志里写明（服务照常启动） |
+| `IDP_WEB_PDF_CONCURRENCY` | `2` | 同时运行的 PDF 读取进程数；满了的调用最多等 2 秒，再回答 `pdf_busy`。每个进程最多 192 MiB，所以容器内存上限要留出余量（清单里是 1 GiB） |
 | `IDP_WEB_TEST_ORIGINS` | 空 | 只用于测试：免检的 `主机:端口`（ADR-0001 D14） |
 | `IDP_WEB_REQUIRE_CALLER` | `true` | 请求必须带调用者；`false` 只用于单机开发 |
 | `IDP_WEB_PROVIDER` | **必填** | 搜索服务：`fixture`、`exa`、`brave`；没设，或它的密钥或文件缺失，启动即退出（2） |

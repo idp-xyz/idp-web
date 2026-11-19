@@ -746,7 +746,8 @@ func TestEverySentinelHasAFixedSentence(t *testing.T) {
 		refs.ErrMalformed, refs.ErrExpired, refs.ErrNotForIt,
 		tenants.ErrDisabled, tenants.ErrOpenDisabled, tenants.ErrExcluded, tenants.ErrNotIncluded,
 		search.ErrUnavailable, search.ErrBusy,
-		fetch.ErrNotPublic, fetch.ErrRobots, fetch.ErrTooLarge, fetch.ErrTooSlow, fetch.ErrType, fetch.ErrPDF, fetch.ErrEncoding,
+		fetch.ErrNotPublic, fetch.ErrRobots, fetch.ErrTooLarge, fetch.ErrTooSlow, fetch.ErrType, fetch.ErrEncoding,
+		fetch.ErrPDFNoText, fetch.ErrPDFEncrypted, fetch.ErrPDFMalformed, fetch.ErrPDFTooLarge, fetch.ErrPDFTooSlow, fetch.ErrPDFUnavailable, fetch.ErrPDFBusy,
 		fetch.ErrBotCheck, fetch.ErrNeedsScript, fetch.ErrStatus, fetch.ErrTooManyRedirects, fetch.ErrConnect, fetch.ErrUnreadable,
 		fmt.Errorf("%w: the scheme %q is not http or https", errAddrRefused(), "ftp"),
 	} {

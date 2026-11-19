@@ -255,7 +255,17 @@ func (a *api) read(ctx context.Context, tool string, caller mcp.Caller, pol tena
 	if next >= 0 {
 		start = next - len(part)
 	}
-	head := fmt.Sprintf("[%d] %s (bytes %d–%d of %d", n, title, start, start+len(part), total)
+	what := ""
+	if c.page.Type == "application/pdf" {
+		// the document's pages, and that a long one was cut, so that the model neither takes a cut document for the whole
+		// nor has to open the text to find out (ADR-0001 D31)
+		what = fmt.Sprintf("PDF, %d pages", c.page.Pages)
+		if c.page.PagesRead < c.page.Pages {
+			what += fmt.Sprintf(", only the first %d are read", c.page.PagesRead)
+		}
+		what += "; "
+	}
+	head := fmt.Sprintf("[%d] %s (%sbytes %d–%d of %d", n, title, what, start, start+len(part), total)
 	if next >= 0 {
 		head += fmt.Sprintf("; the rest: %s with offset %d)", tool, next)
 	} else {

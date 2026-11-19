@@ -109,7 +109,16 @@ var mappings = []mapping{
 	{fetch.ErrTooLarge, "too_large", decisionFailed, ""},
 	{fetch.ErrTooSlow, "too_slow", decisionFailed, ""},
 	{fetch.ErrType, "content_type", decisionFailed, ""},
-	{fetch.ErrPDF, "pdf", decisionFailed, ""},
+	// the PDF reader (ADR-0001 D31): each of its refusals has a reason of its own, so that an operator reading the audit
+	// or the counter can tell a scan from a damaged file from a reader that is not there; the sentences are fixed here
+	// because the reader's own errors carry the parser's words for the log, which the model must not read
+	{fetch.ErrPDFNoText, "pdf_no_text_layer", decisionFailed, "the PDF has no text layer (it is a scan or pictures only) and this service does not do character recognition: use another source, or the excerpt of the search result"},
+	{fetch.ErrPDFEncrypted, "pdf_encrypted", decisionFailed, "the PDF is protected with a password: use another source, or the excerpt of the search result"},
+	{fetch.ErrPDFMalformed, "pdf_malformed", decisionFailed, "the PDF is damaged, or not a valid PDF: use another source, or the excerpt of the search result"},
+	{fetch.ErrPDFTooLarge, "pdf_too_large", decisionFailed, "the PDF holds more data than can be read: use another source, or the excerpt of the search result"},
+	{fetch.ErrPDFTooSlow, "pdf_too_slow", decisionFailed, "the PDF could not be read within the time allowed: use another source, or the excerpt of the search result"},
+	{fetch.ErrPDFUnavailable, "pdf_reader_unavailable", decisionFailed, "reading PDFs is not available in this service: use another source, or the excerpt of the search result"},
+	{fetch.ErrPDFBusy, "pdf_busy", decisionFailed, "the PDF reader is busy with other documents: try again in a little while, or use another source"},
 	{fetch.ErrEncoding, "encoding", decisionFailed, ""},
 	{fetch.ErrBotCheck, "bot_check", decisionFailed, ""},
 	{fetch.ErrNeedsScript, "needs_script", decisionFailed, "the content of this page is produced by script and cannot be read now: use another source, or the excerpt of the search result"},

@@ -124,9 +124,22 @@ tenants:
 | `numbering_unavailable` | `failed` | 数据库没给出来源编号：配置了数据库时，没有设限额的租户也依赖它；页面已读到的话已进缓存，数据库恢复后重试不会再请求网站 |
 | `invalid_arguments`、`no_caller` | `refused` | 参数不合 schema；请求没带调用者（没经过网关） |
 | `provider_busy`、`provider_error` | `failed` | 搜索服务限流或出错：看服务商的状态与密钥；日志里有详情（`search provider request failed` 或 `search provider answered with an error`，带状态码） |
-| `too_large`、`too_slow`、`content_type`、`pdf`、`encoding`、`bot_check`、`http_status`、`redirects`、`connect`、`unreadable` | `failed` | 网站没给出可读的内容（太大、太慢、不是文字、是 PDF、编码不认识、要人机验证、非 2xx、重定向太多、连不上、提取不出文字） |
+| `too_large`、`too_slow`、`content_type`、`encoding`、`bot_check`、`http_status`、`redirects`、`connect`、`unreadable` | `failed` | 网站没给出可读的内容（太大、太慢、不是文字也不是 PDF、编码不认识、要人机验证、非 2xx、重定向太多、连不上、提取不出文字） |
+| `pdf_no_text_layer` | `failed` | PDF 没有文字层（扫描件、只有图；每页不足 20 个字符的页不算有文字，有文字的页不到十分之一就是没有）：模型读到"换一个来源，或用搜索结果的摘录"。这不是故障，没有 OCR（D31） |
+| `pdf_encrypted`、`pdf_malformed`、`pdf_too_large` | `failed` | PDF 要用户密码；损坏或根本不是 PDF（包括标成 PDF 而内容不是的）；解压后的数据过多（压缩炸弹）或读取程序超出内存上限而中止。日志里 `the PDF reader refused the document`（带读取程序的原因词与细节）或 `the PDF reader died`（带退出状态与它的第一行错误输出） |
+| `pdf_too_slow` | `failed` | PDF 读取在期限（6 秒，且不超过这次调用剩下的时间）内没完成，进程组已被杀掉。日志 `the PDF reader was stopped at its deadline` |
+| `pdf_busy` | `failed` | 同时读取的 PDF 数达到 `IDP_WEB_PDF_CONCURRENCY`，等了 2 秒仍没有空位：重试即可；持续出现就调大并发或副本数（每个进程最多 192 MiB） |
+| `pdf_reader_unavailable` | `failed` | PDF 读取不可用：`IDP_WEB_PDF=off`，或启动时没找到 `idp-web-pdf`、它起不来或没通过自检（日志 `reading PDFs is not available: …` 写明原因，启动时一行，之后每次 PDF 调用都是这个原因）。镜像里应有 `/idp-web-pdf`（第 6.1 节） |
 | `needs_script` | `failed` | 页面的正文由脚本生成，只读 HTML 看不到（框架页：空的挂载点、要求开启 JavaScript 的提示、正文在脚本字符串里），文字又很少；模型读到"换一个来源，或用搜索结果的摘录"。这类调用占 `web_fetch` 的份额（`idp_web_failed_total{tool="web_fetch",reason="needs_script"}` 除以 `idp_web_calls_total{tool="web_fetch"}`）是平台 ADR-0003 附录 D 第 6 节决定渲染器做不做的数据，门槛 5%；它是下限（见 ADR-0001 D27 的"不识别的"）。日志里 `the page needs script` 一行带规则名（`empty_mount`、`placeholder_mount`、`skeleton`、`noscript_notice`、`script_prose`）。验证页仍是 `bot_check`，不是它 |
 | `unavailable`、`internal`、`canceled` | `failed` | 服务自己的问题或调用被取消：日志里 `tool failed` 有详情 |
+
+### 6.1 PDF 读取
+
+- **镜像里有两个文件**：`/idp-web`（服务）与 `/idp-web-pdf`（PDF 读取程序，每份 PDF 起一个进程，自己给自己设限制后才读文件）。`deploy/build.sh` 两个都编；用别的办法造镜像时别漏掉第二个，否则启动日志是 `reading PDFs is not available: the PDF reader command was not found`，服务照常运行，PDF 一律回答不可用。
+- **关掉**：`IDP_WEB_PDF=off`（立即生效需要重启 Pod）。关掉后 PDF 仍会被下载（受 5 MiB、15 秒的限制）再回答"不可用"；要连下载也不做，就用域名名单。
+- **限制**（D31）：下载 5 MiB 与 15 秒不变；读取最多 6 秒、最多 192 MiB 内存（`RLIMIT_DATA`）、最多 200 页；读取程序没有网络、不能起别的程序、没有环境变量、没有继承的文件描述符。同时最多 `IDP_WEB_PDF_CONCURRENCY`（2）个，Pod 的内存上限要容得下（清单里是 1 GiB）。
+- **要求**：Linux amd64 或 arm64，内核 5.9 以上最好（旧内核上关闭继承描述符退化为逐个关）；容器的 seccomp 档案要允许 `seccomp` 与 `prctl` 系统调用（Docker 与 containerd 的缺省档案都允许）。限制施加不了时读取程序拒绝运行，启动自检失败，服务报告 PDF 不可用，不会无限制地解析。
+- **看一份 PDF 为什么读不了**：`docker run --rm -i --entrypoint /idp-web-pdf <镜像> < 文件.pdf`，标准错误第一行是原因词与细节，退出码非零；成功时标准输出是文本，标准错误一行 `pdf pages=… read=… title=…`。
 
 ## 7. 故障排查
 
@@ -143,6 +156,8 @@ tenants:
 | 所有读取 `too_slow` 或 `connect`，搜索正常 | 出口策略没放行 80 / 443（被策略丢弃的连接等不到响应，表现为 `too_slow`），或 CNI 不执行 NetworkPolicy 之外的东西挡了 | 确认 CNI 执行策略；节点是否能出站 |
 | 读内网的页面一律被拒 | 这是设计：发布的出口规则和服务都排除私网地址。验收里的测试源站靠测试专用的策略与 `IDP_WEB_TEST_ORIGINS`，生产里不要照做 | 内部资料不走这个组件 |
 | `ref_malformed` 突然很多 | `ref` 密钥换了而没留旧行，或服务重启后换了密钥 | 第 5 节 |
+| 所有 PDF 都回答"reading PDFs is not available" | 启动日志里有原因：没设对 `IDP_WEB_PDF`、镜像里没有 `/idp-web-pdf`、自检没通过（限制施加不了：seccomp 档案太严、内核太旧、不是 amd64 或 arm64） | 第 6.1 节；改好后重启 |
+| 日志 `the PDF reader died` 很多 | 读取程序在限制下中止：内存上限（`fatal error: runtime: out of memory`）或崩溃；每次只影响那一次调用 | 看第一行错误输出；个别文档预期如此，成批出现则是解析库的问题，保留文档报告 |
 | 编号 `[n]` 在重启后从 1 开始 | 没有配置数据库：编号在内存里、按副本（D19）；配置了数据库则不会，除非那个调用者已经一小时没用 | 预期 / 第 9 节 |
 | 日志 `IDP_WEB_TENANTS_FILE: … set dailySearches or dailyReads, which needs the database` | 租户文件里有限额而没有配置数据库 | 设 `IDP_WEB_DATABASE_URL_FILE`，或去掉限额 |
 | 日志 `schema at version 0, binary needs 1 (run idp-web migrate)` / `schema not migrated` | 迁移没跑，或镜像比库新 | 先跑 Job `idp-web-migrate`，再滚动 Deployment |

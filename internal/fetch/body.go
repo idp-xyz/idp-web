@@ -10,6 +10,8 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"unicode/utf8"
 
@@ -19,8 +21,8 @@ import (
 	"idp-web/internal/extract"
 )
 
-// textTypes are the media types that are read (ADR-0001 D10). PDF is refused with a message of its own, everything
-// else as "not read".
+// textTypes are the media types that are read as text (ADR-0001 D10); PDF is read by the PDF reader (D31), everything
+// else is refused as "not read".
 var textTypes = map[string]bool{"text/html": true, "application/xhtml+xml": true, "text/plain": true}
 
 func mediaType(h http.Header) string {
@@ -38,13 +40,15 @@ func (r *Reader) page(ctx context.Context, resp *http.Response, final addr.Addre
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return Page{}, r.errorAnswer(resp, kind)
 	}
-	if kind == "application/pdf" {
-		return Page{}, ErrPDF
-	}
-	if !textTypes[kind] {
-		if kind == "" {
-			kind = "(none)"
-		}
+	// What the page is comes from its bytes where they say so (ADR-0001 D31). A body that starts with %PDF- is a PDF
+	// whatever the server called it: servers send PDFs as application/octet-stream, as text/plain, with no type at all,
+	// and a reader that believed the label would show the model a page of PDF syntax or refuse a document it could read.
+	// The other way round, a body labelled application/pdf that is an HTML page (an error or a login page, which is what
+	// it nearly always is) is read as the HTML page it is; any other body under that label is a damaged PDF.
+	// Only the types that can hold a PDF or a page are read for this: the rest are refused as before, unread.
+	isPDFLabel := kind == "application/pdf" || kind == "application/x-pdf"
+	sniffed := kind == "" || kind == "application/octet-stream" || kind == "binary/octet-stream"
+	if !textTypes[kind] && !isPDFLabel && !sniffed {
 		return Page{}, wrap(ErrType, "content type %s is not read", kind)
 	}
 	if strings.EqualFold(resp.Header.Get("Cf-Mitigated"), "challenge") {
@@ -56,6 +60,21 @@ func (r *Reader) page(ctx context.Context, resp *http.Response, final addr.Addre
 	body, err := readBody(resp, r.maxBytes, false)
 	if err != nil {
 		return Page{}, r.bodyError(err)
+	}
+	if bytes.HasPrefix(body, []byte("%PDF-")) {
+		return r.pdfPage(ctx, body, finalURL)
+	}
+	if isPDFLabel {
+		if !looksLikeHTML(body) {
+			r.log.Info("a body labelled PDF is not one", "bytes", len(body))
+			return Page{}, wrap(ErrPDFMalformed, "the answer is labelled as a PDF but is not one")
+		}
+		kind = "text/html"
+	} else if sniffed {
+		if kind == "" {
+			kind = "(none)"
+		}
+		return Page{}, wrap(ErrType, "content type %s is not read", kind)
 	}
 	text := decodeText(body, resp.Header.Get("Content-Type"))
 	if kind == "text/plain" {
@@ -225,4 +244,49 @@ func decodeText(body []byte, contentType string) string {
 		out = body
 	}
 	return strings.TrimPrefix(strings.ToValidUTF8(string(out), "�"), "\xef\xbb\xbf")
+}
+
+// looksLikeHTML says whether a body that is not a PDF starts like an HTML page, after a byte order mark and white
+// space.
+func looksLikeHTML(body []byte) bool {
+	b := bytes.TrimLeft(bytes.TrimPrefix(body, []byte("\xef\xbb\xbf")), " \t\r\n")
+	if len(b) > 64 {
+		b = b[:64]
+	}
+	b = bytes.ToLower(b)
+	for _, p := range []string{"<!doctype html", "<html", "<head", "<body"} {
+		if bytes.HasPrefix(b, []byte(p)) {
+			return true
+		}
+	}
+	return false
+}
+
+// pdfPage hands a downloaded PDF to the PDF reader, which runs it in a process of its own with limits (D31).
+func (r *Reader) pdfPage(ctx context.Context, body []byte, finalURL string) (Page, error) {
+	if r.cfg.PDF == nil {
+		return Page{}, ErrPDFUnavailable
+	}
+	out, err := r.cfg.PDF.Read(ctx, body)
+	if err != nil {
+		return Page{}, err
+	}
+	title := out.Title
+	if title == "" {
+		title = pdfNameOf(finalURL)
+	}
+	return Page{FinalURL: finalURL, Title: title, Text: out.Text, Bytes: len(body), Type: "application/pdf", Engine: "pdf",
+		Pages: out.Pages, PagesRead: out.PagesRead}, nil
+}
+
+// pdfNameOf is the last part of the address' path, which is what a document without a title is called.
+func pdfNameOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	if name := path.Base(u.Path); name != "." && name != "/" && name != "" {
+		return name
+	}
+	return u.Host
 }

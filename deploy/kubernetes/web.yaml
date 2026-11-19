@@ -96,7 +96,7 @@ spec:
             periodSeconds: 20
           resources:
             requests: {cpu: 50m, memory: 128Mi}
-            limits: {cpu: "1", memory: 512Mi}     # the read cache holds up to 64 MiB of text, and a page is read whole before it is cut
+            limits: {cpu: "1", memory: 1Gi}       # the read cache holds up to 64 MiB of text, a page is read whole before it is cut, and the PDF reader (up to two processes of 192 MiB at once, IDP_WEB_PDF_CONCURRENCY, ADR-0001 D31) is in the same container
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
