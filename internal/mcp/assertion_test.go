@@ -10,7 +10,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -78,35 +77,6 @@ func TestTheGatewaysAssertionIsAccepted(t *testing.T) {
 	// once
 	if _, err := v.Verify(vectorAssertion, "tools/call", params(t, vectorParams)); err == nil || !strings.Contains(err.Error(), "before") {
 		t.Fatalf("a replayed assertion: %v", err)
-	}
-}
-
-func TestAnAssertionIsRefusedForAnotherRequestServerOrTime(t *testing.T) {
-	other := strings.Replace(vectorParams, "print(", "exfiltrate(", 1)
-	if _, err := vectorVerifier(t).Verify(vectorAssertion, "tools/call", params(t, other)); err == nil || !strings.Contains(err.Error(), "another request") {
-		t.Fatalf("other arguments: %v", err)
-	}
-	otherTool := strings.Replace(vectorParams, "sandbox_run", "sandbox_delete", 1)
-	if _, err := vectorVerifier(t).Verify(vectorAssertion, "tools/call", params(t, otherTool)); err == nil {
-		t.Fatal("another tool was accepted")
-	}
-	if _, err := vectorVerifier(t).Verify(vectorAssertion, "resources/read", params(t, vectorParams)); err == nil {
-		t.Fatal("another method was accepted")
-	}
-	elsewhere, _ := NewCallerVerifier([]byte(vectorKey), "http://another-server:9000/mcp")
-	elsewhere.now = func() time.Time { return vectorTime }
-	if _, err := elsewhere.Verify(vectorAssertion, "tools/call", params(t, vectorParams)); err == nil || !strings.Contains(err.Error(), "made for") {
-		t.Fatalf("another audience: %v", err)
-	}
-	late := vectorVerifier(t)
-	late.now = func() time.Time { return vectorTime.Add(2 * time.Minute) }
-	if _, err := late.Verify(vectorAssertion, "tools/call", params(t, vectorParams)); err == nil || !strings.Contains(err.Error(), "expired") {
-		t.Fatalf("after its minute: %v", err)
-	}
-	early := vectorVerifier(t)
-	early.now = func() time.Time { return vectorTime.Add(-5 * time.Minute) }
-	if _, err := early.Verify(vectorAssertion, "tools/call", params(t, vectorParams)); err == nil || !strings.Contains(err.Error(), "future") {
-		t.Fatalf("before it was made: %v", err)
 	}
 }
 
@@ -237,97 +207,10 @@ func TestTheServerTakesTheCallerFromTheAssertionOnly(t *testing.T) {
 	}
 }
 
-// Each refusal the gateway's assertion rules call for, as a case of its own and with its own reason. A positive control
-// comes first: the same assertion with nothing wrong is accepted, so the refusals below are for their reasons and not
-// for a mistake in the way the test forges.
-func TestEachRefusalOfAnAssertionIsForItsOwnReason(t *testing.T) {
-	mine := otherKey(t)
-	der, _ := x509.MarshalPKIXPublicKey(&mine.PublicKey)
-	kid, _ := keyID(&mine.PublicKey)
-	pemKey := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+// Keys that are not P-256 are refused when the server is configured. (The refusals of an assertion itself, one case
+// each with its own reason, are the caller-assertion vectors: caller_vectors_test.go.)
+func TestKeysThatAreNotP256AreRefusedAtConfiguration(t *testing.T) {
 	const audience = "http://web:8580/mcp"
-	p := params(t, `{"name":"web_search","arguments":{"query":"idp"},`+meta+`}`)
-	digest, err := requestDigest("tools/call", p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := vectorTime
-	head := map[string]any{"alg": "ES256", "typ": assertionType, "kid": kid}
-	jti := 0
-	claims := func(change func(map[string]any)) map[string]any {
-		jti++
-		c := map[string]any{"aud": audience, "iat": now.Unix(), "exp": now.Add(time.Minute).Unix(), "jti": fmt.Sprint("j", jti),
-			"sub": "alice", "tenant_id": "t1", "roles": []string{"member"}, "req": digest}
-		if change != nil {
-			change(c)
-		}
-		return c
-	}
-	fresh := func() *CallerVerifier {
-		v, err := NewCallerVerifier(pemKey, audience)
-		if err != nil {
-			t.Fatal(err)
-		}
-		v.now = func() time.Time { return now }
-		return v
-	}
-
-	// positive control, and the longest lifetime the gateway may ask for
-	for name, c := range map[string]map[string]any{
-		"a good assertion":                claims(nil),
-		"a lifetime of exactly 5 minutes": claims(func(c map[string]any) { c["exp"] = now.Add(5 * time.Minute).Unix() }),
-		"an audience given as a list":     claims(func(c map[string]any) { c["aud"] = []string{"http://other/mcp", audience} }),
-	} {
-		got, err := fresh().Verify(forge(t, mine, head, c), "tools/call", p)
-		if err != nil || got.Owner() != "t1/alice" {
-			t.Fatalf("%s: %v %+v", name, err, got)
-		}
-	}
-
-	cases := []struct {
-		name      string
-		assertion string
-		reason    string
-	}{
-		{"no assertion", "", "no assertion"},
-		{"wrong audience", forge(t, mine, head, claims(func(c map[string]any) { c["aud"] = "http://sandbox:8570/mcp" })), "made for"},
-		{"expired", forge(t, mine, head, claims(func(c map[string]any) {
-			c["iat"], c["exp"] = now.Add(-10*time.Minute).Unix(), now.Add(-9*time.Minute).Unix()
-		})), "expired"},
-		{"issued in the future", forge(t, mine, head, claims(func(c map[string]any) {
-			c["iat"], c["exp"] = now.Add(10*time.Minute).Unix(), now.Add(11*time.Minute).Unix()
-		})), "future"},
-		{"lifetime over 5 minutes", forge(t, mine, head, claims(func(c map[string]any) { c["exp"] = now.Add(5*time.Minute + time.Second).Unix() })), "too long"},
-		{"alg none", base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"idp-caller+jwt","kid":"`+kid+`"}`)) + "." +
-			strings.Split(forge(t, mine, head, claims(nil)), ".")[1] + ".", "header alg"},
-		{"alg HS256", forge(t, mine, map[string]any{"alg": "HS256", "typ": assertionType, "kid": kid}, claims(nil)), "header alg"},
-		{"params that differ from what was signed", forge(t, mine, head, claims(func(c map[string]any) { c["req"] = "sha256:" + strings.Repeat("0", 64) })), "another request"},
-		{"unknown kid", forge(t, mine, map[string]any{"alg": "ES256", "typ": assertionType, "kid": "not-a-thumbprint"}, claims(nil)), "does not hold"},
-		{"signed by another key under the held kid", forge(t, otherKey(t), head, claims(nil)), "does not verify"},
-	}
-	for _, c := range cases {
-		if _, err := fresh().Verify(c.assertion, "tools/call", p); err == nil || !strings.Contains(err.Error(), c.reason) {
-			t.Errorf("%s: want a refusal for %q, got %v", c.name, c.reason, err)
-		}
-	}
-
-	// the same assertion presented with other arguments than the ones it was signed for
-	changed := params(t, `{"name":"web_search","arguments":{"query":"something else"},`+meta+`}`)
-	if _, err := fresh().Verify(forge(t, mine, head, claims(nil)), "tools/call", changed); err == nil || !strings.Contains(err.Error(), "another request") {
-		t.Errorf("changed arguments: %v", err)
-	}
-
-	// replayed jti: the second presentation of one assertion
-	v := fresh()
-	a := forge(t, mine, head, claims(nil))
-	if _, err := v.Verify(a, "tools/call", p); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := v.Verify(a, "tools/call", p); err == nil || !strings.Contains(err.Error(), "presented before") {
-		t.Errorf("replayed jti: %v", err)
-	}
-
-	// keys that are not P-256 are refused when the server is configured
 	p384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	d384, _ := x509.MarshalPKIXPublicKey(&p384.PublicKey)
 	if _, err := NewCallerVerifier(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: d384}), audience); err == nil || !strings.Contains(err.Error(), "P-256") {
@@ -338,13 +221,4 @@ func TestEachRefusalOfAnAssertionIsForItsOwnReason(t *testing.T) {
 	if _, err := NewCallerVerifier(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: dRSA}), audience); err == nil || !strings.Contains(err.Error(), "P-256") {
 		t.Errorf("an RSA key: %v", err)
 	}
-}
-
-func otherKey(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return k
 }
