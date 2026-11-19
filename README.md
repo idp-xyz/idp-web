@@ -12,7 +12,7 @@ IDP TELOS 的联网组件：一个 MCP 服务器，让 Agent 搜索网页、读�
 | `web_fetch` | `url`、`ref`、可选 `offset` | 读取搜索结果里出现过的地址，`ref` 是该地址的凭证；地址与 `ref` 对不上就拒绝，所以模型自己拼的地址读不了 |
 | `web_open_url` | `url`、可选 `offset` | 读取成员给的地址；只有租户文件里 `openUrl: true` 的租户可用，确认由 HOST 强制 |
 
-`web_search` 返回编号的结果（`[n] 标题`、`address:`、`ref:`、`published:`、`excerpt:`）和 `structuredContent.citations`（`n`、`title`、`url`）；`web_fetch` 与 `web_open_url` 返回正文的一段（12 KiB），首行写明总长度与位置，`citations` 里有最终地址、读取时间和这一段的 SHA-256。同一个调用者看到的同一个地址总是同一个编号 `n`。
+`web_search` 返回编号的结果（`[n] 标题`、`address:`、`ref:`、`published:`、`excerpt:`）和 `structuredContent.citations`（`n`、`title`、`url`）；`web_fetch` 与 `web_open_url` 返回正文的一段（12 KiB），首行写明总长度与位置，`citations` 里有被要求的地址（`url`，与搜索结果里的相同）、读取被重定向时的最终地址（`finalUrl`，否则没有这个字段）、读取时间和这一段的 SHA-256。同一个调用者看到的同一个地址总是同一个编号 `n`。
 
 **PDF**：有文字层的 PDF 读成文本，每页前有一行 `[page N]`（模型据此引用页码），首行写明是 PDF 和总页数（`[1] 标题 (PDF, 30 pages; bytes 0–12288 of 80211; …)`）；超过 200 页的只读前 200 页，首行和正文开头都写明。表格按行输出（一行的各个单元格在同一行里，不是 Markdown 表格）。扫描件（没有文字层）、加密的、损坏的 PDF 各有自己的错误句子（`pdf_no_text_layer`、`pdf_encrypted`、`pdf_malformed`，还有 `pdf_too_large`、`pdf_too_slow`、`pdf_busy`、`pdf_reader_unavailable`），都建议换一个来源。**不做**：OCR、需要用户密码的 PDF、表单与附件、从右到左和竖排文字的阅读顺序（D31）。解析在子进程 `idp-web-pdf` 里做，带时间、内存、系统调用的限制，镜像里有两个二进制：`/idp-web` 与 `/idp-web-pdf`。
 

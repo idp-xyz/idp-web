@@ -29,9 +29,13 @@ func (a *api) policy(c mcp.Caller) tenants.Policy {
 
 // citation is the structured record of a source the model was given (platform ADR-0003 D9).
 type citation struct {
-	N         int    `json:"n"`
-	Title     string `json:"title"`
-	URL       string `json:"url"`
+	N     int    `json:"n"`
+	Title string `json:"title"`
+	URL   string `json:"url"`
+	// FinalURL is where a read ended when that is not the address that was asked for (ADR-0001 D19 and D20): the number
+	// and "url" identify the address that was asked for, so that the member can match them with the search result, and a
+	// runtime that keeps the first address it sees for a number never sees a second one. Absent when there was no redirect.
+	FinalURL  string `json:"finalUrl,omitempty"`
 	FetchedAt string `json:"fetchedAt,omitempty"`
 	SHA256    string `json:"sha256,omitempty"`
 }
@@ -249,7 +253,19 @@ func (a *api) read(ctx context.Context, tool string, caller mcp.Caller, pol tena
 	n := nums[0]
 	title := strings.Join(strings.Fields(c.page.Title), " ")
 	if title == "" {
-		title = c.page.FinalURL
+		title = u
+	}
+	// Where the read ended, when a redirect took it elsewhere. The reader followed every hop through the address rules, so
+	// this is an address like any other this service hands out; it is checked again here because it goes out in a
+	// structured field (a value that fails is left out and logged, the page is still read).
+	final, redirected := "", ""
+	if c.page.FinalURL != "" && c.page.FinalURL != u {
+		if ft, err := addr.TargetWith(c.page.FinalURL, addr.Options{TestOrigins: a.cfg.TestOrigins}); err == nil {
+			final = ft.URL()
+			redirected = " [the address redirected to " + final + "]"
+		} else {
+			a.log.Error("the address a read ended at fails the address rules", "err", err)
+		}
 	}
 	start := total - len(part)
 	if next >= 0 {
@@ -265,7 +281,7 @@ func (a *api) read(ctx context.Context, tool string, caller mcp.Caller, pol tena
 		}
 		what += "; "
 	}
-	head := fmt.Sprintf("[%d] %s (%sbytes %d–%d of %d", n, title, what, start, start+len(part), total)
+	head := fmt.Sprintf("[%d] %s%s (%sbytes %d–%d of %d", n, title, redirected, what, start, start+len(part), total)
 	if next >= 0 {
 		head += fmt.Sprintf("; the rest: %s with offset %d)", tool, next)
 	} else {
@@ -280,5 +296,5 @@ func (a *api) read(ctx context.Context, tool string, caller mcp.Caller, pol tena
 	}
 	sum := sha256.Sum256([]byte(part))
 	return mcp.Result{Text: head + "\n\n" + body, Structured: map[string]any{"citations": []citation{{
-		N: n, Title: title, URL: c.page.FinalURL, FetchedAt: c.fetchedAt.Format(time.RFC3339), SHA256: hex.EncodeToString(sum[:])}}}}
+		N: n, Title: title, URL: u, FinalURL: final, FetchedAt: c.fetchedAt.Format(time.RFC3339), SHA256: hex.EncodeToString(sum[:])}}}}
 }

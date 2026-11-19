@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -190,7 +191,15 @@ entries:
   - match: gone
     results:
       - {url: %q, title: "Not there"}
-`, u("allowed.test", "/article"), u("blocked.test", "/page"), u("allowed.test", "/article"), u("allowed.test", "/other"), u("allowed.test", "/go"), u("allowed.test", "/gone"))))
+  - match: bounce once
+    results:
+      - {url: %q, title: "Moved once"}
+  - match: bounce twice
+    results:
+      - {url: %q, title: "Moved twice"}
+`, u("allowed.test", "/article"), u("blocked.test", "/page"), u("allowed.test", "/article"), u("allowed.test", "/other"), u("allowed.test", "/go"), u("allowed.test", "/gone"),
+		u("allowed.test", "/to?to="+url.QueryEscape(u("other.test", "/article"))),
+		u("allowed.test", "/to?to="+url.QueryEscape(u("allowed.test", "/to?to="+url.QueryEscape(u("other.test", "/article"))))))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -806,5 +815,77 @@ func TestAPageThatNeedsScriptIsTheModelsSentenceTheAuditReasonAndItsOwnCount(t *
 	}
 	if w.met.calls["failed/web_open_url/needs_script"] != 1 || w.met.calls["refused/web_open_url/needs_script"] != 0 {
 		t.Errorf("%v", w.met.calls)
+	}
+}
+
+// A read that a redirect took elsewhere is numbered and cited under the address that was asked for (ADR-0001 D19 and D20):
+// the agent runtime keeps the first address it sees for a number and counts a conflict for a second one, so a citation
+// that said "n, B" after the search said "n, A" would signal a fault that is not one. Where the read ended is a field of
+// its own.
+func TestAReadThatRedirectsIsCitedUnderTheAddressThatWasAskedForAndSaysWhereItEnded(t *testing.T) {
+	for _, c := range []struct{ name, query string }{{"once", "bounce once"}, {"twice", "bounce twice"}} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t)
+			res := w.as("acme", "alice", "web_search", map[string]any{"query": c.query})
+			address, ref := listed(t, res, 0)
+			sc := citations(t, res)
+			if len(sc) != 1 || sc[0]["url"] != address {
+				t.Fatalf("citations %v", sc)
+			}
+			page := w.as("acme", "alice", "web_fetch", map[string]any{"url": address, "ref": ref})
+			if isErr(page) {
+				t.Fatal(text(page))
+			}
+			end := w.url("other.test", "/article")
+			pc := citations(t, page)
+			if len(pc) != 1 || pc[0]["n"] != sc[0]["n"] || pc[0]["url"] != sc[0]["url"] {
+				t.Fatalf("the search cited %v, the read cited %v", sc, pc)
+			}
+			if pc[0]["finalUrl"] != end {
+				t.Errorf("finalUrl is %v, want %s", pc[0]["finalUrl"], end)
+			}
+			// the model sees it too, before the part, and the part is the page that was reached
+			head := text(page)[:strings.Index(text(page), "\n\n")]
+			if !strings.HasPrefix(head, "[1] The Parcel Report [the address redirected to "+end+"] (bytes 0–") {
+				t.Errorf("head line %q", head)
+			}
+			part := text(page)[strings.Index(text(page), "\n\n")+2:]
+			if pc[0]["sha256"] != fmt.Sprintf("%x", sha(part)) {
+				t.Errorf("sha256 %v is not the part's", pc[0]["sha256"])
+			}
+			// the second read comes from the cache, keyed by the asked address, and says the same
+			again := w.as("acme", "alice", "web_fetch", map[string]any{"url": address, "ref": ref})
+			ac := citations(t, again)
+			if len(ac) != 1 || ac[0]["n"] != pc[0]["n"] || ac[0]["url"] != pc[0]["url"] || ac[0]["finalUrl"] != end {
+				t.Errorf("the cached read cited %v", ac)
+			}
+		})
+	}
+}
+
+func TestAReadWithoutARedirectHasNoFinalAddress(t *testing.T) {
+	w := newWorld(t)
+	res := w.as("acme", "alice", "web_search", map[string]any{"query": "parcels"})
+	address, ref := listed(t, res, 0)
+	page := w.as("acme", "alice", "web_fetch", map[string]any{"url": address, "ref": ref})
+	pc := citations(t, page)
+	if len(pc) != 1 {
+		t.Fatalf("%v", page)
+	}
+	if _, has := pc[0]["finalUrl"]; has {
+		t.Errorf("citation %v has a finalUrl", pc[0])
+	}
+	if strings.Contains(text(page), "redirected") {
+		t.Errorf("%.200s", text(page))
+	}
+}
+
+func TestAReadThatRedirectsToAnAddressTheRulesRefuseIsStillRefused(t *testing.T) {
+	w := newWorld(t)
+	for _, to := range []string{"http://10.0.0.1/", "http://169.254.169.254/latest/"} {
+		got := w.as("opener", "alice", "web_open_url", map[string]any{"url": w.url("allowed.test", "/to?to="+url.QueryEscape(to))})
+		if !isErr(got) || len(citations(t, got)) != 0 {
+			t.Errorf("a redirect to %s: %v", to, got)
+		}
 	}
 }

@@ -139,7 +139,7 @@ tenants:
 - **关掉**：`IDP_WEB_PDF=off`（立即生效需要重启 Pod）。关掉后 PDF 仍会被下载（受 5 MiB、15 秒的限制）再回答"不可用"；要连下载也不做，就用域名名单。
 - **限制**（D31）：下载 5 MiB 与 15 秒不变；读取最多 6 秒、最多 192 MiB 内存（`RLIMIT_DATA`）、最多 200 页；读取程序没有网络、不能起别的程序、没有环境变量、没有继承的文件描述符。同时最多 `IDP_WEB_PDF_CONCURRENCY`（2）个，Pod 的内存上限要容得下（清单里是 1 GiB）。
 - **要求**：Linux amd64 或 arm64，内核 5.9 以上最好（旧内核上关闭继承描述符退化为逐个关）；容器的 seccomp 档案要允许 `seccomp` 与 `prctl` 系统调用（Docker 与 containerd 的缺省档案都允许）。限制施加不了时读取程序拒绝运行，启动自检失败，服务报告 PDF 不可用，不会无限制地解析。
-- **看一份 PDF 为什么读不了**：`docker run --rm -i --entrypoint /idp-web-pdf <镜像> < 文件.pdf`，标准错误第一行是原因词与细节，退出码非零；成功时标准输出是文本，标准错误一行 `pdf pages=… read=… title=…`。
+- **看一份 PDF 为什么读不了**：`docker run --rm -i --entrypoint /idp-web-pdf <镜像> < 文件.pdf`，标准错误第一行是原因词与细节，退出码非零；成功时标准输出是文本，标准错误一行 `pdf pages=… read=… title=…`。输出不能重定向到文件（`> out.txt`）：读取程序的文件大小限制是 0，这是有意的（它不能写文件），所以标准输出或标准错误是普通文件时它直接以 `unavailable: standard output is a file…` 与退出码 2 结束，要存文件就接管道（`… | cat > out.txt`）。
 
 ## 7. 故障排查
 

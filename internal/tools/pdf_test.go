@@ -31,7 +31,7 @@ func longPDFText(pages int) string {
 
 func TestAPDFIsHeadedAsOneAndPagedLikeAnyPageAndCitedByItsPart(t *testing.T) {
 	text1 := longPDFText(30)
-	w := newWorld(t, options{reader: stubReader{page: fetch.Page{FinalURL: "http://allowed.test/guide.pdf", Title: "Rate guide", Text: text1, Type: "application/pdf", Engine: "pdf", Pages: 30, PagesRead: 30}}})
+	w := newWorld(t, options{reader: stubReader{page: fetch.Page{Title: "Rate guide", Text: text1, Type: "application/pdf", Engine: "pdf", Pages: 30, PagesRead: 30}}})
 	res := w.as("opener", "alice", "web_open_url", map[string]any{"url": w.url("allowed.test", "/guide.pdf")})
 	if isErr(res) {
 		t.Fatal(text(res))
@@ -46,7 +46,7 @@ func TestAPDFIsHeadedAsOneAndPagedLikeAnyPageAndCitedByItsPart(t *testing.T) {
 	}
 	c := citations(t, res)
 	sum := sha256.Sum256([]byte(part))
-	if len(c) != 1 || c[0]["sha256"] != hex.EncodeToString(sum[:]) || c[0]["url"] != "http://allowed.test/guide.pdf" {
+	if len(c) != 1 || c[0]["sha256"] != hex.EncodeToString(sum[:]) || c[0]["url"] != w.url("allowed.test", "/guide.pdf") {
 		t.Errorf("citation %v", c)
 	}
 	// the next part: the page marker that the model cites is in whichever part holds the text
@@ -57,7 +57,7 @@ func TestAPDFIsHeadedAsOneAndPagedLikeAnyPageAndCitedByItsPart(t *testing.T) {
 }
 
 func TestACutPDFSaysItIsCutInTheHeadAndTheModelDoesNotHaveToOpenTheText(t *testing.T) {
-	w := newWorld(t, options{reader: stubReader{page: fetch.Page{FinalURL: "http://allowed.test/long.pdf", Title: "Long", Text: "[PDF, 560 pages; only the first 200 are read]\n\n[page 1]\nOne short page of text.", Type: "application/pdf", Engine: "pdf", Pages: 560, PagesRead: 200}}})
+	w := newWorld(t, options{reader: stubReader{page: fetch.Page{Title: "Long", Text: "[PDF, 560 pages; only the first 200 are read]\n\n[page 1]\nOne short page of text.", Type: "application/pdf", Engine: "pdf", Pages: 560, PagesRead: 200}}})
 	res := w.as("opener", "alice", "web_open_url", map[string]any{"url": w.url("allowed.test", "/long.pdf")})
 	if h := text(res); !strings.HasPrefix(h, "[1] Long (PDF, 560 pages, only the first 200 are read; bytes 0–") || !strings.Contains(h, "[PDF, 560 pages; only the first 200 are read]") {
 		t.Errorf("%.300q", h)

@@ -4,6 +4,7 @@ package pdfreader
 
 import (
 	"fmt"
+	"os/signal"
 	"runtime/debug"
 	"syscall"
 	"unsafe"
@@ -19,6 +20,10 @@ type processLimits struct {
 }
 
 func applyProcessLimits(l processLimits) error {
+	// A write beyond RLIMIT_FSIZE (0, so any write to a regular file) raises SIGXFSZ, whose default action ends the
+	// process without a word. The Go runtime does not act on it; it is ignored here as well so that the write returns
+	// EFBIG, which the command turns into a message, whatever the program that embeds it has set up.
+	signal.Ignore(syscall.SIGXFSZ)
 	set := func(res int, v uint64) error {
 		return syscall.Setrlimit(res, &syscall.Rlimit{Cur: v, Max: v})
 	}

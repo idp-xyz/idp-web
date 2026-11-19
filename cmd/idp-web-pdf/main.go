@@ -5,7 +5,8 @@
 //	idp-web-pdf [-deadline 4s] [-memory-mib 512] < document.pdf
 //
 // Exit status 0 is a text; otherwise standard error starts with a reason word (no_text_layer, encrypted, malformed,
-// too_slow, too_large, unavailable). See internal/pdfread.
+// too_slow, too_large, unavailable). See internal/pdfread. The output must go to a pipe, not to a file: the command may not
+// write files (ADR-0001 D31), and says so with unavailable and exit status 2.
 package main
 
 import "idp-web/internal/pdfreader"

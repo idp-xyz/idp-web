@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -51,6 +52,10 @@ func playCommand(role string, args []string) int {
 	switch role {
 	case "__command__":
 		return ChildMain(args, os.Stdin, os.Stdout, os.Stderr, os.Exit)
+	case "__unchecked__":
+		// standard output is a file that the command cannot see is one (a writer that hides Stat): the check at the start
+		// does not stop it, so the write meets the limit
+		return ChildMain(args, os.Stdin, onlyWrite{os.Stdout}, os.Stderr, os.Exit)
 	case "__noprefilght__":
 		skipPreflight = true
 		return ChildMain(args, os.Stdin, os.Stdout, os.Stderr, os.Exit)
@@ -238,5 +243,99 @@ func TestTheProcessKeepsNoFileOfItsParentAndIsInTheRootDirectory(t *testing.T) {
 		if !strings.HasPrefix(fd, "0=") && !strings.HasPrefix(fd, "1=") && !strings.HasPrefix(fd, "2=") && strings.HasSuffix(fd, "/dev/null") {
 			t.Errorf("a descriptor of the parent is open in the command: %q", out.String())
 		}
+	}
+}
+
+// onlyWrite is a writer that is not recognised as a file.
+type onlyWrite struct{ w io.Writer }
+
+func (o onlyWrite) Write(p []byte) (int, error) { return o.w.Write(p) }
+
+// runChildOn starts the command with the given standard output and error, which the test chooses.
+func runChildOn(t *testing.T, role string, stdin []byte, stdout, stderr *os.File) (exit int, signaled bool) {
+	t.Helper()
+	cmd := exec.Command(childBinary, role)
+	cmd.Env = []string{}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = bytes.NewReader(stdin), stdout, stderr
+	err := cmd.Run()
+	ws, _ := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if err != nil && !ws.Exited() {
+		return -1, ws.Signaled()
+	}
+	return ws.ExitStatus(), false
+}
+
+// The limit on the size of a file is a control (the reader must not be able to write one), so output to a file is not
+// made to work: it is refused with a message that says what to do, instead of a silent exit 1 (ADR-0001 D31).
+func TestOutputToAFileIsRefusedWithAMessageThatSaysToPipeIt(t *testing.T) {
+	doc := pdftest.Titled("A title", "A page with enough words on it to count as text.")
+	dir := t.TempDir()
+	outFile, err := os.Create(dir + "/out.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outFile.Close()
+	var errb bytes.Buffer
+	cmd := exec.Command(childBinary, "__command__")
+	cmd.Env = []string{}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = bytes.NewReader(doc), outFile, &errb
+	err = cmd.Run()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 2 {
+		t.Fatalf("exit %v, stderr %q", err, errb.String())
+	}
+	msg := errb.String()
+	if !strings.HasPrefix(msg, "unavailable: standard output is a file") || !strings.Contains(msg, "pipe the output") || !strings.Contains(msg, "on purpose") || strings.Count(msg, "\n") != 1 {
+		t.Errorf("stderr %q", msg)
+	}
+	if fi, _ := os.Stat(dir + "/out.txt"); fi.Size() != 0 {
+		t.Errorf("%d bytes were written to the file", fi.Size())
+	}
+	// standard error in a file: the message is what the file holds, and nothing else
+	errFile, err := os.Create(dir + "/err.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer errFile.Close()
+	pr, pw, _ := os.Pipe()
+	defer pr.Close()
+	code, _ := runChildOn(t, "__command__", doc, pw, errFile)
+	pw.Close()
+	if code != 2 {
+		t.Errorf("exit %d", code)
+	}
+	if b, _ := os.ReadFile(dir + "/err.txt"); !strings.HasPrefix(string(b), "unavailable: standard error is a file") || strings.Count(string(b), "\n") != 1 {
+		t.Errorf("the file holds %q", b)
+	}
+	if b, _ := io.ReadAll(pr); len(b) != 0 {
+		t.Errorf("standard output has %q", b)
+	}
+}
+
+func TestOutputToAPipeIsReadAsBefore(t *testing.T) {
+	out, errs, exit, _ := runChild("__command__", pdftest.Titled("A title", "A page with enough words on it to count as text."))
+	if exit != "" || !strings.HasPrefix(out, "[page 1]\n") || !strings.Contains(errs, "pdf pages=1") || strings.Contains(errs, "unavailable") {
+		t.Errorf("exit %q stdout %q stderr %q", exit, out, errs)
+	}
+}
+
+// A write to a file that got past the check meets the limit: the process is not killed by SIGXFSZ and does not blame the
+// document, it says what happened.
+func TestAWriteToAFileThatMeetsTheLimitIsReportedAsTheReaderNotTheDocument(t *testing.T) {
+	outFile, err := os.Create(t.TempDir() + "/out.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outFile.Close()
+	pr, pw, _ := os.Pipe()
+	defer pr.Close()
+	code, signaled := runChildOn(t, "__unchecked__", pdftest.Titled("A title", "A page with enough words on it to count as text."), outFile, pw)
+	pw.Close()
+	b, _ := io.ReadAll(pr)
+	if signaled || code != 2 || !strings.HasPrefix(string(b), "unavailable: standard output is a file") || strings.Contains(string(b), "malformed") {
+		t.Errorf("exit %d (killed by a signal: %v), stderr %q", code, signaled, b)
+	}
+	if fi, _ := outFile.Stat(); fi.Size() != 0 {
+		t.Errorf("%d bytes were written", fi.Size())
 	}
 }
