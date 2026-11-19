@@ -33,8 +33,9 @@ func ToMarkdown(root *html.Node) string {
 	return strings.TrimSpace(blocks(root))
 }
 
-// normalizeAtoms sets DataAtom from the tag name: nodes the engines build themselves (go-trafilatura creates its
-// output elements by name) carry no atom, and the converter looks elements up by it.
+// normalizeAtoms sets DataAtom from the tag name: nodes the engine builds itself (go-readability creates its wrapper
+// element by name) carry no atom, and the converter looks elements up by it. It was written for go-trafilatura's nodes,
+// which all lacked one; go-readability's output has one such node (its wrapper div), so the rule stays as a guard.
 func normalizeAtoms(n *html.Node) {
 	if n.Type == html.ElementNode && n.DataAtom == 0 {
 		n.DataAtom = atom.Lookup([]byte(strings.ToLower(n.Data)))
@@ -59,8 +60,9 @@ func isBlock(n *html.Node) bool {
 	return headingLevel(n) > 0 || containers[n.DataAtom]
 }
 
-// isCodeBlock is a multi-line code element sitting between blocks: go-trafilatura writes a pre as such a code element,
-// and a browser would show it as a block too. Short code inside a sentence stays inline.
+// isCodeBlock is a multi-line code element sitting between blocks. It was written for go-trafilatura, which writes a
+// pre as such a code element; it is kept because pages author the same thing (a bare multi-line code element styled
+// as a block, which a browser shows as a block too), and the measured configuration of ADR-0001 3.7 included it. Short code inside a sentence stays inline.
 func isCodeBlock(n *html.Node) bool {
 	par := n.Parent
 	if par == nil || !strings.Contains(strings.TrimSpace(textOf(n)), "\n") {

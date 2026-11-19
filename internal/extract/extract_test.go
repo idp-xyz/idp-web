@@ -6,7 +6,7 @@ import (
 	"unicode/utf8"
 )
 
-var engines = []string{Trafilatura, Readability, Plain}
+var engines = []string{Readability, Plain}
 
 // article wraps body in a page with furniture around it. The text is long enough for the engines to see an article.
 func article(body string) []byte {
@@ -135,7 +135,7 @@ func TestTheFallbackRuleFiresWhenTheEngineFindsNothingOrTooLittle(t *testing.T) 
 		engineText string
 		fallback   bool
 	}{{"", true}, {strings.Repeat("y", 99), true}, {strings.Repeat("y", 100), false}, {strings.Repeat("y", 500), false}} {
-		r := choose(Trafilatura, "", c.engineText, "t", plain, false)
+		r := choose(Readability, "", c.engineText, "t", plain, false)
 		if (r.Engine == Plain) != c.fallback {
 			t.Errorf("an engine text of %d characters against 1000: engine %q, want fallback %v", len(c.engineText), r.Engine, c.fallback)
 		}
@@ -154,7 +154,7 @@ func TestTheFallbackRuleFiresWhenTheEngineFindsNothingOrTooLittle(t *testing.T) 
 
 func TestAPageWithNothingForTheEngineFallsBackToThePlainReaderAndSaysSo(t *testing.T) {
 	in := []byte(`<html><head></head><body><script>var a = 1;</script><div hidden>HIDDEN-SECRET</div></body></html>`)
-	for _, e := range []string{Trafilatura, Readability} {
+	for _, e := range []string{Readability} {
 		r := mustExtract(t, in, Options{Engine: e})
 		if r.Engine != Plain || r.Markdown != "" {
 			t.Errorf("%s: %+v", e, r)
@@ -165,12 +165,10 @@ func TestAPageWithNothingForTheEngineFallsBackToThePlainReaderAndSaysSo(t *testi
 func TestTheSameInputGivesTheSameOutputTwice(t *testing.T) {
 	in := article(`<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table><ul><li>x<ul><li>y</li></ul></li></ul>`)
 	for _, e := range engines {
-		for _, f := range []string{Balanced, Precision, Recall} {
-			a := mustExtract(t, in, Options{Engine: e, Focus: f})
-			b := mustExtract(t, in, Options{Engine: e, Focus: f})
-			if a != b {
-				t.Errorf("%s/%s: two runs differ", e, f)
-			}
+		a := mustExtract(t, in, Options{Engine: e})
+		b := mustExtract(t, in, Options{Engine: e})
+		if a != b {
+			t.Errorf("%s: two runs differ", e)
 		}
 	}
 }
@@ -179,8 +177,8 @@ func TestExtractRefusesUnknownOptionsAndBadAddresses(t *testing.T) {
 	if _, err := Extract(nil, "", Options{Engine: "magic"}); err == nil {
 		t.Error("an unknown engine was accepted")
 	}
-	if _, err := Extract(nil, "", Options{Focus: "magic"}); err == nil {
-		t.Error("an unknown focus was accepted")
+	if _, err := Extract(nil, "", Options{Engine: "trafilatura"}); err == nil {
+		t.Error("the engine that was removed is still accepted")
 	}
 	if _, err := Extract(nil, "http://[::1", Options{}); err == nil {
 		t.Error("a broken address was accepted")
@@ -237,5 +235,13 @@ func TestPageEdges(t *testing.T) {
 	// an offset inside a character moves to the next boundary
 	if p, _, _ := Page("字b", 1, 10); p != "b" {
 		t.Errorf("offset inside a character: %q", p)
+	}
+}
+
+// ADR-0001 3.7: the default engine is readability.
+func TestTheDefaultEngineIsReadability(t *testing.T) {
+	r := mustExtract(t, article(""), Options{})
+	if r.Engine != Readability {
+		t.Errorf("the zero Options used %q, want %q", r.Engine, Readability)
 	}
 }

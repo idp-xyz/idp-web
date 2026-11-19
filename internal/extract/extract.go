@@ -1,17 +1,15 @@
 // Package extract reads the main text of a web page as Markdown (ADR-0001 D5, platform ADR-0003 D4). Three engines can
-// produce it: go-trafilatura, go-readability and our own plain reader. Which of the first two the service uses is
-// decided by measurement on annotated real pages (tools/web_eval), so all three stay selectable here.
+// produce it: go-readability (the default, chosen by measurement on annotated real pages and confirmed on a held-out
+// set, ADR-0001 3.7) and our own plain reader.
 package extract
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/markusmobius/go-trafilatura"
 	"golang.org/x/net/html"
 
 	readability "codeberg.org/readeck/go-readability/v2"
@@ -20,34 +18,22 @@ import (
 // Engines. Result.Engine is one of these: the one that produced the text, which after a fallback is Plain whatever
 // was asked for.
 const (
-	Trafilatura = "trafilatura"
 	Readability = "readability"
 	Plain       = "plain"
 )
 
-// Focus is go-trafilatura's trade between text kept and furniture left out; the other engines ignore it.
-const (
-	Balanced  = "balanced"
-	Precision = "precision"
-	Recall    = "recall"
-)
-
 // FallbackShare is the share of the plain reader's text (by length) that an engine must reach: below it the engine is
 // taken to have failed and the plain reader's text is used. The rule and the number come from the evaluation in
-// platform ADR-0003 13.1, where it rescued the pages (gov.cn documents) on which trafilatura returned nothing or only a
+// platform ADR-0003 13.1, where it rescued the pages (gov.cn documents) on which the engine then measured, trafilatura, returned nothing or only a
 // title.
 const FallbackShare = 0.10
 
-// Options select the engine. The zero value is go-trafilatura, balanced, with the fallback rule.
+// Options select the engine. The zero value is go-readability (ADR-0001 3.7) with the fallback rule.
 type Options struct {
-	Engine string // Trafilatura (default), Readability or Plain
-	Focus  string // Balanced (default), Precision or Recall; go-trafilatura only
+	Engine string // Readability (default) or Plain
 	// NoFallback returns what the engine found even when it is empty or below FallbackShare; the evaluation uses it
 	// to see an engine alone.
 	NoFallback bool
-	// NoInnerFallback switches off go-trafilatura's own use of readability and dom-distiller on a page it cannot read.
-	// It is on by default because the Python reference (trafilatura.extract) does the same.
-	NoInnerFallback bool
 }
 
 // Result is the title and the main text as Markdown, and the engine that produced the text. The text may be empty:
@@ -68,14 +54,9 @@ func Extract(htmlBytes []byte, pageURL string, opts Options) (Result, error) {
 		}
 	}
 	switch opts.Engine {
-	case "", Trafilatura, Readability, Plain:
+	case "", Readability, Plain:
 	default:
 		return Result{}, fmt.Errorf("the engine %q is not known", opts.Engine)
-	}
-	switch opts.Focus {
-	case "", Balanced, Precision, Recall:
-	default:
-		return Result{}, fmt.Errorf("the focus %q is not known", opts.Focus)
 	}
 	doc, err := html.Parse(bytes.NewReader(htmlBytes))
 	if err != nil {
@@ -88,20 +69,14 @@ func Extract(htmlBytes []byte, pageURL string, opts Options) (Result, error) {
 		return Result{Title: plainTitle, Markdown: toValid(plain), Engine: Plain}, nil
 	}
 
-	var title, md string
-	switch opts.Engine {
-	case Readability:
-		title, md, err = viaReadability(doc, u)
-	default:
-		title, md, err = viaTrafilatura(doc, u, opts)
-	}
+	title, md, err := viaReadability(doc, u)
 	if err != nil {
 		// an engine that cannot read the page is the same case as one that finds nothing (with NoFallback: an empty text)
 		md = ""
 	}
 	engine := opts.Engine
 	if engine == "" {
-		engine = Trafilatura
+		engine = Readability
 	}
 	return choose(engine, title, md, plainTitle, plain, opts.NoFallback), nil
 }
@@ -115,34 +90,6 @@ func choose(engine, title, md, plainTitle, plain string, noFallback bool) Result
 		return Result{Title: title, Markdown: toValid(plain), Engine: Plain}
 	}
 	return Result{Title: title, Markdown: toValid(md), Engine: engine}
-}
-
-func viaTrafilatura(doc *html.Node, u *url.URL, opts Options) (title, md string, err error) {
-	o := trafilatura.Options{
-		OriginalURL:    u,
-		EnableFallback: !opts.NoInnerFallback,
-		// the evaluation reads no dates, and the date search is the slowest part
-		HtmlDateMode: trafilatura.Disabled,
-		// comments of the page are not its main text; tables are, links and images are dropped by the converter anyway
-		ExcludeComments: true,
-		ExcludeTables:   false,
-	}
-	switch opts.Focus {
-	case Precision:
-		o.Focus = trafilatura.FavorPrecision
-	case Recall:
-		o.Focus = trafilatura.FavorRecall
-	default:
-		o.Focus = trafilatura.Balanced
-	}
-	res, err := trafilatura.ExtractDocument(doc, o)
-	if err != nil {
-		return "", "", err
-	}
-	if res == nil {
-		return "", "", errors.New("no result")
-	}
-	return strings.TrimSpace(res.Metadata.Title), ToMarkdown(res.ContentNode), nil
 }
 
 func viaReadability(doc *html.Node, u *url.URL) (title, md string, err error) {

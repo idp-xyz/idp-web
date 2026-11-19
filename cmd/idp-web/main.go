@@ -14,6 +14,12 @@
 //	                          Set both or neither. Neither: the forwarded caller is taken as it arrives, and only the
 //	                          private network vouches for it
 //
+//	IDP_WEB_TEST_ORIGINS      for tests only: comma-separated host:port pairs the reader may contact although they are
+//	                          not public addresses or not on port 80 or 443 (ADR-0001 D14). Nothing else is exempted
+//
+// `idp-web -check-tls https://host/` reads one page through the reader and exits; it shows that TLS verifies from
+// inside the image, which has no CA certificates of its own (ADR-0001 D13).
+//
 // A configuration error is written to stderr and the exit status is 2. The settings for the search service, the
 // reference key, the tenants and the reader come with the tasks that need them (platform ADR-0003 appendix C, 4.8).
 package main
@@ -34,6 +40,10 @@ import (
 
 	"idp-web/internal/mcp"
 	"idp-web/internal/tools"
+
+	// The image is FROM scratch and holds no CA certificates. This import registers Mozilla's roots as the fallback of
+	// crypto/x509, which Go uses when the system has none (ADR-0001 D13).
+	_ "golang.org/x/crypto/x509roots/fallback"
 )
 
 // version is stamped by the build (deploy/build.sh) and reported in serverInfo.
@@ -96,6 +106,19 @@ func (m *metrics) write(w http.ResponseWriter) {
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if len(os.Args) > 1 && os.Args[1] == "-check-tls" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := checkTLS(ctx, os.Args[2:], os.Stdout, os.Stderr, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		stop()
+		os.Exit(code)
+	}
+	testOrigins, err := parseTestOrigins(os.Getenv("IDP_WEB_TEST_ORIGINS"))
+	if err != nil {
+		fatal("invalid IDP_WEB_TEST_ORIGINS:", err)
+	}
+	if len(testOrigins) > 0 {
+		log.Warn("IDP_WEB_TEST_ORIGINS exempts these origins from the address rules: for tests only", "origins", len(testOrigins))
+	}
 	listen := env("IDP_WEB_LISTEN", "127.0.0.1:8580")
 	if host, _, err := net.SplitHostPort(listen); err != nil {
 		fatal("invalid IDP_WEB_LISTEN:", err)

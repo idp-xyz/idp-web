@@ -2,7 +2,7 @@
 // Markdown to standard output. It exists so that the evaluation (tools/web_eval, WEB_EVAL_EXTRACTORS) can score the
 // extraction of idp-web on the same annotated pages as the Python reference (ADR-0001 D5).
 //
-//	idp-web-extract [-url ADDRESS] [-engine trafilatura|readability|plain] [-focus balanced|precision|recall] [-no-fallback] < page.html
+//	idp-web-extract [-url ADDRESS] [-engine readability|plain] [-no-fallback] < page.html
 //
 // Standard error gets one line, "engine=<what produced the text> title=<title>". The exit status is 0 even when the
 // text is empty; it is 2 for a flag or input that cannot be used.
@@ -24,10 +24,8 @@ func run(args []string, in io.Reader, out, errw io.Writer) int {
 	fs := flag.NewFlagSet("idp-web-extract", flag.ContinueOnError)
 	fs.SetOutput(errw)
 	pageURL := fs.String("url", "", "the address the page was read from")
-	engine := fs.String("engine", extract.Trafilatura, "trafilatura, readability or plain")
-	focus := fs.String("focus", extract.Balanced, "balanced, precision or recall (trafilatura only)")
+	engine := fs.String("engine", extract.Readability, "readability or plain")
 	noFallback := fs.Bool("no-fallback", false, "do not replace an empty or too short result by the plain reader's text")
-	noInner := fs.Bool("no-inner-fallback", false, "switch off go-trafilatura's own readability and dom-distiller fallback")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -36,7 +34,7 @@ func run(args []string, in io.Reader, out, errw io.Writer) int {
 		fmt.Fprintln(errw, "idp-web-extract: cannot read the page:", err)
 		return 2
 	}
-	res, err := extract.Extract(body, *pageURL, extract.Options{Engine: *engine, Focus: *focus, NoFallback: *noFallback, NoInnerFallback: *noInner})
+	res, err := extract.Extract(body, *pageURL, extract.Options{Engine: *engine, NoFallback: *noFallback})
 	if err != nil {
 		fmt.Fprintln(errw, "idp-web-extract:", err)
 		return 2

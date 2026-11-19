@@ -35,3 +35,11 @@ func TestAnUnknownEngineOrFlagIsStatusTwo(t *testing.T) {
 		}
 	}
 }
+
+func TestTheDefaultEngineOfTheCommandIsReadability(t *testing.T) {
+	var out, errw bytes.Buffer
+	page := "<html><head><title>T</title></head><body><article><h1>Head</h1>" + strings.Repeat("<p>Readability keeps a paragraph that is long enough to be the article of this page, with words in it.</p>", 6) + "</article></body></html>"
+	if code := run(nil, strings.NewReader(page), &out, &errw); code != 0 || !strings.HasPrefix(errw.String(), "engine=readability ") {
+		t.Errorf("exit %d, stderr %q", code, errw.String())
+	}
+}
