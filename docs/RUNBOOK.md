@@ -154,6 +154,7 @@ tenants:
 | 网关到 idp-web 超时（调用时，不是登记时） | 同上，或 Pod 不就绪 | `kubectl -n idp-web get pods`，`/readyz` |
 | `web_search` 全是 `provider_error` | 服务商的密钥错或额度用完；或出口策略把服务商的地址挡了（集群的 Pod、Service、节点网段落在 `except` 之外但服务商在 `except` 的某段内，一般不会）| 看日志里 `search provider …` 的警告（状态码与服务商的回答）；镜像是 scratch，没有 shell，进不去，看日志与 `/metrics` |
 | 所有读取 `too_slow` 或 `connect`，搜索正常 | 出口策略没放行 80 / 443（被策略丢弃的连接等不到响应，表现为 `too_slow`），或 CNI 不执行 NetworkPolicy 之外的东西挡了 | 确认 CNI 执行策略；节点是否能出站 |
+| 个别站点的读取偶尔 `too_slow`（如 www.fedex.com 从没有可用 IPv6 的网络），IPv4 用 curl -4 很快 | 该网络的 IPv6 连得上但随后不通：连接竞速（D32）看不出来。默认 `IDP_WEB_DIAL_FAMILY=prefer-ipv4` 已让 IPv4 先拨；若设成了 `dual` 或 `ipv6-only` 就改回。纯 IPv6 的网络用 `dual`（默认值在那里多花 250 ms） | ADR-0001 D32 |
 | 读内网的页面一律被拒 | 这是设计：发布的出口规则和服务都排除私网地址。验收里的测试源站靠测试专用的策略与 `IDP_WEB_TEST_ORIGINS`，生产里不要照做 | 内部资料不走这个组件 |
 | `ref_malformed` 突然很多 | `ref` 密钥换了而没留旧行，或服务重启后换了密钥 | 第 5 节 |
 | 所有 PDF 都回答"reading PDFs is not available" | 启动日志里有原因：没设对 `IDP_WEB_PDF`、镜像里没有 `/idp-web-pdf`、自检没通过（限制施加不了：seccomp 档案太严、内核太旧、不是 amd64 或 arm64） | 第 6.1 节；改好后重启 |

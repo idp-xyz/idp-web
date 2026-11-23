@@ -111,6 +111,9 @@ type Config struct {
 	// TestOrigins are exact "host:port" pairs that are exempt from the port rule and the public-address rule, for
 	// tests only (ADR-0001 D14).
 	TestOrigins map[string]bool
+	// DialFamily is which address families the checked dial uses and which goes first (IDP_WEB_DIAL_FAMILY, ADR-0001
+	// D32). Default: prefer-ipv4.
+	DialFamily DialFamily
 	// Version goes into the User-Agent.
 	Version string
 	Log     *slog.Logger

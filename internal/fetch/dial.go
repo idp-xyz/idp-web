@@ -77,13 +77,9 @@ func (r *Reader) checkedDial(ctx context.Context, network, address string) (net.
 	if dial == nil {
 		dial = (&net.Dialer{}).DialContext
 	}
-	var last error
-	for _, ip := range ips {
-		c, err := dial(ctx, "tcp", netip.AddrPortFrom(ip.Unmap(), uint16(port)).String())
-		if err == nil {
-			return c, nil
-		}
-		last = err
+	c, err := dialRace(ctx, dial, r.cfg.DialFamily, ips, port)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrConnect, err)
 	}
-	return nil, fmt.Errorf("%w: %v", ErrConnect, last)
+	return c, nil
 }

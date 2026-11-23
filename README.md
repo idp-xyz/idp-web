@@ -49,6 +49,7 @@ CI 里的第三方镜像（扫描用的 trivy）先由 `deploy/pull-image.sh` �
 | `IDP_WEB_PDF` | `on` | `off` 关掉 PDF 读取：PDF 一律回答"reading PDFs is not available"（`pdf_reader_unavailable`）；别的值是配置错误 |
 | `IDP_WEB_PDF_READER` | 与 `idp-web` 同目录的 `idp-web-pdf` | PDF 读取程序的路径；启动时用一份内置的小 PDF 试跑一次，找不到、起不来、读不出就当作"PDF 不可用"并在日志里写明（服务照常启动） |
 | `IDP_WEB_PDF_CONCURRENCY` | `2` | 同时运行的 PDF 读取进程数；满了的调用最多等 2 秒，再回答 `pdf_busy`。每个进程最多 192 MiB，所以容器内存上限要留出余量（清单里是 1 GiB） |
+| `IDP_WEB_DIAL_FAMILY` | `prefer-ipv4` | `prefer-ipv4`（默认）、`dual`、`ipv4-only`、`ipv6-only`：检查过的地址按哪些地址族拨、哪个先拨（ADR-0001 D32）。默认 IPv4 先拨，IPv6 晚 250 ms 才开始；`dual` 是 RFC 8305 原样（解析器的第一个族先拨）；`ipv4-only` / `ipv6-only` 在拨号前丢掉另一个族，没有剩下的地址就按“无地址”报连接错误。不认识的值启动失败，启动时记一行日志 |
 | `IDP_WEB_TEST_ORIGINS` | 空 | 只用于测试：免检的 `主机:端口`（ADR-0001 D14） |
 | `IDP_WEB_REQUIRE_CALLER` | `true` | 请求必须带调用者；`false` 只用于单机开发 |
 | `IDP_WEB_PROVIDER` | **必填** | 搜索服务：`fixture`、`exa`、`brave`；没设，或它的密钥或文件缺失，启动即退出（2） |

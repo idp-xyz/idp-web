@@ -68,6 +68,7 @@ import (
 	"syscall"
 	"time"
 
+	"idp-web/internal/fetch"
 	"idp-web/internal/mcp"
 	"idp-web/internal/tools"
 
@@ -218,6 +219,11 @@ func main() {
 	if len(testOrigins) > 0 {
 		log.Warn("IDP_WEB_TEST_ORIGINS exempts these origins from the address rules: for tests only", "origins", len(testOrigins))
 	}
+	dialFamily, err := fetch.ParseDialFamily(os.Getenv("IDP_WEB_DIAL_FAMILY"))
+	if err != nil {
+		fatal("invalid IDP_WEB_DIAL_FAMILY:", err)
+	}
+	log.Info("address families of page reads", "dialFamily", string(dialFamily))
 	listen := env("IDP_WEB_LISTEN", "127.0.0.1:8580")
 	if host, _, err := net.SplitHostPort(listen); err != nil {
 		fatal("invalid IDP_WEB_LISTEN:", err)
@@ -246,7 +252,7 @@ func main() {
 	met := &metrics{counts: map[[2]string]int64{}, nanos: map[string]int64{}, refused: map[[2]string]int64{}, failed: map[[2]string]int64{}}
 	srv := mcp.New("idp-web", version,
 		"Searches the web and reads pages: web_search returns results with a ref, web_fetch reads a result with its ref, web_open_url reads an address the member gave and needs the member's confirmation.",
-		tools.New(tools.Config{Log: log, Metrics: met, RequireCaller: requireCaller, Provider: cfg.provider, Reader: newReader(log, testOrigins, pdf),
+		tools.New(tools.Config{Log: log, Metrics: met, RequireCaller: requireCaller, Provider: cfg.provider, Reader: newReader(log, testOrigins, dialFamily, pdf),
 			Keys: cfg.keys, Tenants: cfg.tenants, State: st, TestOrigins: testOrigins, Limits: cfg.limits}))
 	srv.Log = log
 

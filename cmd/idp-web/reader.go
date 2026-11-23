@@ -49,8 +49,8 @@ func parseTestOrigins(s string) (map[string]bool, error) {
 }
 
 // newReader is the page reader of the service, configured from the environment.
-func newReader(log *slog.Logger, origins map[string]bool, pdf fetch.PDFReader) *fetch.Reader {
-	return fetch.New(fetch.Config{TestOrigins: origins, Version: version, Log: log, PDF: pdf})
+func newReader(log *slog.Logger, origins map[string]bool, family fetch.DialFamily, pdf fetch.PDFReader) *fetch.Reader {
+	return fetch.New(fetch.Config{TestOrigins: origins, DialFamily: family, Version: version, Log: log, PDF: pdf})
 }
 
 // startPDFReader prepares reading PDFs (ADR-0001 D31) and returns nil, with the reason in the log, when it cannot be
@@ -96,7 +96,7 @@ func checkTLS(ctx context.Context, args []string, out, errw io.Writer, log *slog
 		fmt.Fprintln(errw, "usage: idp-web -check-tls https://host/")
 		return 2
 	}
-	page, err := newReader(log, nil, nil).Read(ctx, args[0])
+	page, err := newReader(log, nil, "", nil).Read(ctx, args[0])
 	if err != nil {
 		fmt.Fprintln(out, "failed:", err)
 		return 1
