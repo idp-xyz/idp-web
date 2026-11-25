@@ -104,7 +104,7 @@ tenants:
 ## 6. 日志与指标
 
 - **审计**：标准输出上的 JSON，每次工具调用一行 `"msg":"audit"`，字段：`tool`、`outcome`、`ms`、`tenant`、`caller`（租户与主体的短哈希，不记成员标识本身）、`query` 与 `url`（明文：它们就是外发的内容，包括被拒绝的地址）、`results`、`dropped`、`bytes`、`cache`、`decision`（`allowed`、`refused`、`failed`）、`reason`。**没有 `ref`、密钥、页面文字**（D23）。`kubectl -n idp-web logs deploy/idp-web | grep '"msg":"audit"'`。留存期是集群日志策略的事，不在本服务里。
-- **指标**：`idp_web_calls_total{tool,outcome}`、`idp_web_refused_total{tool,reason}`、`idp_web_failed_total{tool,reason}`（网站或服务商没给出的调用，按原因）、`idp_web_call_seconds_total{tool}`，在 9580，只放 `observability` 命名空间抓取。
+- **指标**：`idp_web_calls_total{tool,outcome}`、`idp_web_refused_total{tool,reason}`、`idp_web_failed_total{tool,reason}`（网站或服务商没给出的调用，按原因）、`idp_web_call_seconds_total{tool}`、`idp_web_renders_total{outcome}`（渲染的结果：`ok`、`thin`、`refused` 与渲染器的码）、`idp_web_render_seconds_total`，在 9580，只放 `observability` 命名空间抓取。
 - **拒绝原因**（审计里的 `reason`，指标里的 `reason`）：
 
 | `reason` | `decision` | 含义与处理 |
@@ -131,6 +131,8 @@ tenants:
 | `pdf_busy` | `failed` | 同时读取的 PDF 数达到 `IDP_WEB_PDF_CONCURRENCY`，等了 2 秒仍没有空位：重试即可；持续出现就调大并发或副本数（每个进程最多 192 MiB） |
 | `pdf_reader_unavailable` | `failed` | PDF 读取不可用：`IDP_WEB_PDF=off`，或启动时没找到 `idp-web-pdf`、它起不来或没通过自检（日志 `reading PDFs is not available: …` 写明原因，启动时一行，之后每次 PDF 调用都是这个原因）。镜像里应有 `/idp-web-pdf`（第 6.1 节） |
 | `needs_script` | `failed` | 页面的正文由脚本生成，只读 HTML 看不到（框架页：空的挂载点、要求开启 JavaScript 的提示、正文在脚本字符串里），文字又很少；模型读到"换一个来源，或用搜索结果的摘录"。这类调用占 `web_fetch` 的份额（`idp_web_failed_total{tool="web_fetch",reason="needs_script"}` 除以 `idp_web_calls_total{tool="web_fetch"}`）是平台 ADR-0003 附录 D 第 6 节决定渲染器做不做的数据，门槛 5%；它是下限（见 ADR-0001 D27 的"不识别的"）。日志里 `the page needs script` 一行带规则名（`empty_mount`、`placeholder_mount`、`skeleton`、`noscript_notice`、`script_prose`）。验证页仍是 `bot_check`，不是它 |
+| `blocked_by_site` | `failed` | 网站对自动读取者拒绝显示页面（HTTP 200 的拒绝页如 FedEx、Akamai "you don't have permission"，或渲染器认出验证码与反爬页）。不重试、不绕过；模型读到"换一个来源"。个别站点从某个网络出去被拒是常态，换网络出口可能就好，不是故障 |
+| `render_failed`、`render_busy`、`render_timeout`、`not_allowed`、`invalid_request`、`unauthorized`、`render_unreachable` | `failed` | 页面需要渲染而没有成功（模型读到的是 `needs_script` 的句子）：`render_failed` 也是"渲染后仍是框架页"；`render_busy` 渲染池满；`render_timeout` 渲染器没在时限内答复；`unauthorized` 与 `render_unreachable` 见第 7 节。审计的 `render` 字段与 `idp_web_renders_total` 看分布 |
 | `unavailable`、`internal`、`canceled` | `failed` | 服务自己的问题或调用被取消：日志里 `tool failed` 有详情 |
 
 ### 6.1 PDF 读取
@@ -159,6 +161,11 @@ tenants:
 | `ref_malformed` 突然很多 | `ref` 密钥换了而没留旧行，或服务重启后换了密钥 | 第 5 节 |
 | 所有 PDF 都回答"reading PDFs is not available" | 启动日志里有原因：没设对 `IDP_WEB_PDF`、镜像里没有 `/idp-web-pdf`、自检没通过（限制施加不了：seccomp 档案太严、内核太旧、不是 amd64 或 arm64） | 第 6.1 节；改好后重启 |
 | 日志 `the PDF reader died` 很多 | 读取程序在限制下中止：内存上限（`fatal error: runtime: out of memory`）或崩溃；每次只影响那一次调用 | 看第一行错误输出；个别文档预期如此，成批出现则是解析库的问题，保留文档报告 |
+| 日志 `IDP_WEB_RENDER_KEY_FILE is not set` / `IDP_WEB_RENDER_URL: …` / `IDP_WEB_RENDER_KEY_FILE: …` | 设了 `IDP_WEB_RENDER_URL` 而密钥缺、文件读不了、不是 P-256 私钥，或 URL 不是带路径的 http(s) 地址（不许有查询、用户名） | 补上密钥 Secret；URL 形如 `http://idp-browser.idp-browser.svc.cluster.local:8590/render` |
+| 页面一律 `needs_script`，审计 `reason` 是 `render_unreachable` | 渲染器没起来、Service 名或端口不对，或 NetworkPolicy 不放 idp-web 到 idp-browser 的 8590（出口与渲染器那边的入口都要放） | `kubectl -n idp-browser get pods`；从 idp-web 的 Pod 里试连；其余读取不受影响，这是设计 |
+| 页面一律 `needs_script`，审计 `reason` 是 `unauthorized` | 密钥或受众对不上：渲染器持有的公钥不是这把私钥的（启动日志 `keyId` 与渲染器日志里它持有的 key id 比对）；`IDP_WEB_RENDER_URL` 与渲染器验证用的受众不逐字相同（主机名、端口、`/render` 都算，`localhost` 与 `127.0.0.1` 不同）；两边时钟差超过 30 秒。渲染器的日志 `caller assertion refused` 的 `why` 写明是哪一种（`signed with a key this server does not hold`、`made for "…", not for …`、`expired`） | 对齐后重启 idp-web；轮换密钥时渲染器先同时持有新旧两把公钥 |
+| 审计 `reason` 是 `render_timeout` 很多 | 渲染器慢（页面重、出网慢）或挂住；idp-web 在 `IDP_WEB_RENDER_TIMEOUT_MS` 加 5 秒后放弃 | 看渲染器的指标与日志；调大时限要同时看 HOST 的工具超时 |
+| `blocked_by_site` 很多 | 某个站点（或本网络的出口）被反爬拦了，包括对 curl 返回 200 拒绝页的（FedEx） | 模型已被告知换来源；多个站点同时出现要查出口 IP 是否被列入黑名单 |
 | 编号 `[n]` 在重启后从 1 开始 | 没有配置数据库：编号在内存里、按副本（D19）；配置了数据库则不会，除非那个调用者已经一小时没用 | 预期 / 第 9 节 |
 | 日志 `IDP_WEB_TENANTS_FILE: … set dailySearches or dailyReads, which needs the database` | 租户文件里有限额而没有配置数据库 | 设 `IDP_WEB_DATABASE_URL_FILE`，或去掉限额 |
 | 日志 `schema at version 0, binary needs 1 (run idp-web migrate)` / `schema not migrated` | 迁移没跑，或镜像比库新 | 先跑 Job `idp-web-migrate`，再滚动 Deployment |

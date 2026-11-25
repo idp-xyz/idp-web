@@ -1,0 +1,155 @@
+{
+  "format": "idp.telos.browser-caller-assertion-vectors/v1",
+  "audience": "http://idp-browser.idp-browser.svc.cluster.local:8590/render",
+  "subject": "idp-web",
+  "keys": [
+    {
+      "Name": "idp-web",
+      "Kid": "ry-dEuuxkILnKLZF-_Lqna4LJfIplrxMvPndrTO7r1E",
+      "PEM": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAECUVOfJsSqgdloYq7Hv9+IRJTceti\n9mbLgfA24HMk9YRyjNNYohnQR2JdbZ6MLMttxqETYiwI3fn2Z9cvvHn6LQ==\n-----END PUBLIC KEY-----\n"
+    },
+    {
+      "Name": "stranger",
+      "Kid": "B2r02jeAd1WeKnvuQaM5g5wrxablnnQIP1yFd2E_vmg",
+      "PEM": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEWQeXPmBAGquegsJyjbS2yvh5Jk4w\nLUT4DZrYUekujkWC0ERiMqonPDQXAknq5nD9PArpfD0eR04rcB29eF2dgA==\n-----END PUBLIC KEY-----\n"
+    }
+  ],
+  "cases": [
+    {
+      "name": "good",
+      "description": "What idp-web signs for a render, presented ten seconds later.",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/render",
+          "body": "{\"url\":\"https://example.com/\",\"timeoutMs\":15000}",
+          "assertion": "eyJhbGciOiJFUzI1NiIsImtpZCI6InJ5LWRFdXV4a0lMbktMWkYtX0xxbmE0TEpmSXBscnhNdlBuZHJUTzdyMUUiLCJ0eXAiOiJpZHAtY2FsbGVyK2p3dCJ9.eyJhdWQiOiJodHRwOi8vaWRwLWJyb3dzZXIuaWRwLWJyb3dzZXIuc3ZjLmNsdXN0ZXIubG9jYWw6ODU5MC9yZW5kZXIiLCJpYXQiOjE3OTU0MzUyMDAsImV4cCI6MTc5NTQzNTIzMCwianRpIjoielRpOFlXa1I0em1jWUVMOCIsInN1YiI6ImlkcC13ZWIiLCJyZXEiOiJzaGEyNTY6Nzc5YTAxNDEzMDA2MTIzZWY2MDA2OGU4YzgyZGQ0N2YyNGI4NGVkZDkzNGE2Y2Q2YjBhZTBkNGE5YmZiODU0ZCJ9.UQ8bQW3U032SYWkccKsirrfMM_fhhDONGoZCoMp-Odc7EDISGVu76tGOWFImgfbU1kKcepmOU10EoozHeSys2Q",
+          "now": "2026-11-23T12:00:10Z",
+          "digest": "sha256:779a01413006123ef60068e8c82dd47f24b84edd934a6cd6b0ae0d4a9bfb854d",
+          "accept": true
+        }
+      ]
+    },
+    {
+      "name": "replayed",
+      "description": "The same assertion presented twice: the second is refused.",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/render",
+          "body": "{\"url\":\"https://example.com/\",\"timeoutMs\":15000}",
+          "assertion": "eyJhbGciOiJFUzI1NiIsImtpZCI6InJ5LWRFdXV4a0lMbktMWkYtX0xxbmE0TEpmSXBscnhNdlBuZHJUTzdyMUUiLCJ0eXAiOiJpZHAtY2FsbGVyK2p3dCJ9.eyJhdWQiOiJodHRwOi8vaWRwLWJyb3dzZXIuaWRwLWJyb3dzZXIuc3ZjLmNsdXN0ZXIubG9jYWw6ODU5MC9yZW5kZXIiLCJpYXQiOjE3OTU0MzUyMDAsImV4cCI6MTc5NTQzNTIzMCwianRpIjoielRpOFlXa1I0em1jWUVMOCIsInN1YiI6ImlkcC13ZWIiLCJyZXEiOiJzaGEyNTY6Nzc5YTAxNDEzMDA2MTIzZWY2MDA2OGU4YzgyZGQ0N2YyNGI4NGVkZDkzNGE2Y2Q2YjBhZTBkNGE5YmZiODU0ZCJ9.UQ8bQW3U032SYWkccKsirrfMM_fhhDONGoZCoMp-Odc7EDISGVu76tGOWFImgfbU1kKcepmOU10EoozHeSys2Q",
+          "now": "2026-11-23T12:00:10Z",
+          "digest": "sha256:779a01413006123ef60068e8c82dd47f24b84edd934a6cd6b0ae0d4a9bfb854d",
+          "accept": true
+        },
+        {
+          "method": "POST",
+          "path": "/render",
+          "body": "{\"url\":\"https://example.com/\",\"timeoutMs\":15000}",
+          "assertion": "eyJhbGciOiJFUzI1NiIsImtpZCI6InJ5LWRFdXV4a0lMbktMWkYtX0xxbmE0TEpmSXBscnhNdlBuZHJUTzdyMUUiLCJ0eXAiOiJpZHAtY2FsbGVyK2p3dCJ9.eyJhdWQiOiJodHRwOi8vaWRwLWJyb3dzZXIuaWRwLWJyb3dzZXIuc3ZjLmNsdXN0ZXIubG9jYWw6ODU5MC9yZW5kZXIiLCJpYXQiOjE3OTU0MzUyMDAsImV4cCI6MTc5NTQzNTIzMCwianRpIjoielRpOFlXa1I0em1jWUVMOCIsInN1YiI6ImlkcC13ZWIiLCJyZXEiOiJzaGEyNTY6Nzc5YTAxNDEzMDA2MTIzZWY2MDA2OGU4YzgyZGQ0N2YyNGI4NGVkZDkzNGE2Y2Q2YjBhZTBkNGE5YmZiODU0ZCJ9.UQ8bQW3U032SYWkccKsirrfMM_fhhDONGoZCoMp-Odc7EDISGVu76tGOWFImgfbU1kKcepmOU10EoozHeSys2Q",
+          "now": "2026-11-23T12:00:11Z",
+          "digest": "sha256:779a01413006123ef60068e8c82dd47f24b84edd934a6cd6b0ae0d4a9bfb854d",
+          "accept": false,
+          "reason": "presented before"
+        }
+      ]
+    },
+    {
+      "name": "expired",
+      "description": "Presented after the lifetime and the allowed skew.",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/render",
+          "body": "{\"url\":\"https://example.com/\",\"timeoutMs\":15000}",
+          "assertion": "eyJhbGciOiJFUzI1NiIsImtpZCI6InJ5LWRFdXV4a0lMbktMWkYtX0xxbmE0TEpmSXBscnhNdlBuZHJUTzdyMUUiLCJ0eXAiOiJpZHAtY2FsbGVyK2p3dCJ9.eyJhdWQiOiJodHRwOi8vaWRwLWJyb3dzZXIuaWRwLWJyb3dzZXIuc3ZjLmNsdXN0ZXIubG9jYWw6ODU5MC9yZW5kZXIiLCJpYXQiOjE3OTU0MzUyMDAsImV4cCI6MTc5NTQzNTIzMCwianRpIjoielRpOFlXa1I0em1jWUVMOCIsInN1YiI6ImlkcC13ZWIiLCJyZXEiOiJzaGEyNTY6Nzc5YTAxNDEzMDA2MTIzZWY2MDA2OGU4YzgyZGQ0N2YyNGI4NGVkZDkzNGE2Y2Q2YjBhZTBkNGE5YmZiODU0ZCJ9.UQ8bQW3U032SYWkccKsirrfMM_fhhDONGoZCoMp-Odc7EDISGVu76tGOWFImgfbU1kKcepmOU10EoozHeSys2Q",
+          "now": "2026-11-23T12:01:01Z",
+          "digest": "sha256:779a01413006123ef60068e8c82dd47f24b84edd934a6cd6b0ae0d4a9bfb854d",
+          "accept": false,
+          "reason": "expired"
+        }
+      ]
+    },
+    {
+      "name": "another body",
+      "description": "The signature was made for another page.",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/render",
+          "body": "{\"url\":\"http://169.254.169.254/\"}",
+          "assertion": "eyJhbGciOiJFUzI1NiIsImtpZCI6InJ5LWRFdXV4a0lMbktMWkYtX0xxbmE0TEpmSXBscnhNdlBuZHJUTzdyMUUiLCJ0eXAiOiJpZHAtY2FsbGVyK2p3dCJ9.eyJhdWQiOiJodHRwOi8vaWRwLWJyb3dzZXIuaWRwLWJyb3dzZXIuc3ZjLmNsdXN0ZXIubG9jYWw6ODU5MC9yZW5kZXIiLCJpYXQiOjE3OTU0MzUyMDAsImV4cCI6MTc5NTQzNTIzMCwianRpIjoielRpOFlXa1I0em1jWUVMOCIsInN1YiI6ImlkcC13ZWIiLCJyZXEiOiJzaGEyNTY6Nzc5YTAxNDEzMDA2MTIzZWY2MDA2OGU4YzgyZGQ0N2YyNGI4NGVkZDkzNGE2Y2Q2YjBhZTBkNGE5YmZiODU0ZCJ9.UQ8bQW3U032SYWkccKsirrfMM_fhhDONGoZCoMp-Odc7EDISGVu76tGOWFImgfbU1kKcepmOU10EoozHeSys2Q",
+          "now": "2026-11-23T12:00:01Z",
+          "digest": "sha256:7ddbafc45274ec7879015761f7f3eb3894f5845c5451ad2c86f88b7b7cd08b28",
+          "accept": false,
+          "reason": "another request"
+        }
+      ]
+    },
+    {
+      "name": "another key",
+      "description": "Signed by a key the verifier does not hold.",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/render",
+          "body": "{\"url\":\"https://example.com/\",\"timeoutMs\":15000}",
+          "assertion": "eyJhbGciOiJFUzI1NiIsImtpZCI6IkIycjAyamVBZDFXZUtudnVRYU01ZzV3cnhhYmxublFJUDF5RmQyRV92bWciLCJ0eXAiOiJpZHAtY2FsbGVyK2p3dCJ9.eyJhdWQiOiJodHRwOi8vaWRwLWJyb3dzZXIuaWRwLWJyb3dzZXIuc3ZjLmNsdXN0ZXIubG9jYWw6ODU5MC9yZW5kZXIiLCJpYXQiOjE3OTU0MzUyMDAsImV4cCI6MTc5NTQzNTIzMCwianRpIjoidjEiLCJzdWIiOiJpZHAtd2ViIiwicmVxIjoic2hhMjU2Ojc3OWEwMTQxMzAwNjEyM2VmNjAwNjhlOGM4MmRkNDdmMjRiODRlZGQ5MzRhNmNkNmIwYWUwZDRhOWJmYjg1NGQifQ.nkn-CFEy3Vr_ep7nFtjQEUmTZhwY-Oe4t3tUC2lM-P9Ok04Pog7rnQ6TGul7HEs1T3Wcc-tA28fqOWJjxUO0pw",
+          "now": "2026-11-23T12:00:01Z",
+          "digest": "sha256:779a01413006123ef60068e8c82dd47f24b84edd934a6cd6b0ae0d4a9bfb854d",
+          "accept": false,
+          "reason": "does not hold"
+        }
+      ]
+    },
+    {
+      "name": "another caller",
+      "description": "Signed by the right key for another subject.",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/render",
+          "body": "{\"url\":\"https://example.com/\",\"timeoutMs\":15000}",
+          "assertion": "eyJhbGciOiJFUzI1NiIsImtpZCI6InJ5LWRFdXV4a0lMbktMWkYtX0xxbmE0TEpmSXBscnhNdlBuZHJUTzdyMUUiLCJ0eXAiOiJpZHAtY2FsbGVyK2p3dCJ9.eyJhdWQiOiJodHRwOi8vaWRwLWJyb3dzZXIuaWRwLWJyb3dzZXIuc3ZjLmNsdXN0ZXIubG9jYWw6ODU5MC9yZW5kZXIiLCJpYXQiOjE3OTU0MzUyMDAsImV4cCI6MTc5NTQzNTIzMCwianRpIjoidjIiLCJzdWIiOiJpZHAtaG9zdCIsInJlcSI6InNoYTI1Njo3NzlhMDE0MTMwMDYxMjNlZjYwMDY4ZThjODJkZDQ3ZjI0Yjg0ZWRkOTM0YTZjZDZiMGFlMGQ0YTliZmI4NTRkIn0.ET7LteZN42kdllEnosICDHy0hJL-_WhKUj04Rz8QKXkoLTyOLyfsa-MYIk6lv_1sxyIgcZJY45iyVSOT27AUpw",
+          "now": "2026-11-23T12:00:01Z",
+          "digest": "sha256:779a01413006123ef60068e8c82dd47f24b84edd934a6cd6b0ae0d4a9bfb854d",
+          "accept": false,
+          "reason": "only"
+        }
+      ]
+    },
+    {
+      "name": "another audience",
+      "description": "Made for another endpoint.",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/render",
+          "body": "{\"url\":\"https://example.com/\",\"timeoutMs\":15000}",
+          "assertion": "eyJhbGciOiJFUzI1NiIsImtpZCI6InJ5LWRFdXV4a0lMbktMWkYtX0xxbmE0TEpmSXBscnhNdlBuZHJUTzdyMUUiLCJ0eXAiOiJpZHAtY2FsbGVyK2p3dCJ9.eyJhdWQiOiJodHRwOi8vb3RoZXIvcmVuZGVyIiwiaWF0IjoxNzk1NDM1MjAwLCJleHAiOjE3OTU0MzUyMzAsImp0aSI6InYzIiwic3ViIjoiaWRwLXdlYiIsInJlcSI6InNoYTI1Njo3NzlhMDE0MTMwMDYxMjNlZjYwMDY4ZThjODJkZDQ3ZjI0Yjg0ZWRkOTM0YTZjZDZiMGFlMGQ0YTliZmI4NTRkIn0.SntTyod6J1E3ZCS5SDFFfbwx50ty3Iz2oIgas8uhL_8pGNCLYtugd-P9K5t1T7xoNdw2wAofujBh8Ok12w3ZwQ",
+          "now": "2026-11-23T12:00:01Z",
+          "digest": "sha256:779a01413006123ef60068e8c82dd47f24b84edd934a6cd6b0ae0d4a9bfb854d",
+          "accept": false,
+          "reason": "made for"
+        }
+      ]
+    },
+    {
+      "name": "too long",
+      "description": "Valid for an hour: not something idp-web signs.",
+      "steps": [
+        {
+          "method": "POST",
+          "path": "/render",
+          "body": "{\"url\":\"https://example.com/\",\"timeoutMs\":15000}",
+          "assertion": "eyJhbGciOiJFUzI1NiIsImtpZCI6InJ5LWRFdXV4a0lMbktMWkYtX0xxbmE0TEpmSXBscnhNdlBuZHJUTzdyMUUiLCJ0eXAiOiJpZHAtY2FsbGVyK2p3dCJ9.eyJhdWQiOiJodHRwOi8vaWRwLWJyb3dzZXIuaWRwLWJyb3dzZXIuc3ZjLmNsdXN0ZXIubG9jYWw6ODU5MC9yZW5kZXIiLCJpYXQiOjE3OTU0MzUyMDAsImV4cCI6MTc5NTQzODgwMCwianRpIjoidjQiLCJzdWIiOiJpZHAtd2ViIiwicmVxIjoic2hhMjU2Ojc3OWEwMTQxMzAwNjEyM2VmNjAwNjhlOGM4MmRkNDdmMjRiODRlZGQ5MzRhNmNkNmIwYWUwZDRhOWJmYjg1NGQifQ.pKbhiVnRITiGKFtidcKjDkROQN0-Bro7-2PER9wKgEzmF-Qt8qC6cnxKHuXmLZIh71wJZlWlxG-qnRDKBd-bGw",
+          "now": "2026-11-23T12:00:01Z",
+          "digest": "sha256:779a01413006123ef60068e8c82dd47f24b84edd934a6cd6b0ae0d4a9bfb854d",
+          "accept": false,
+          "reason": "too long"
+        }
+      ]
+    }
+  ]
+}

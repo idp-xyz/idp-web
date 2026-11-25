@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 状态 | 已接受（2026-11-19，随任务 W1；平台 ADR-0003 附录 C 的阶段 1 计划）；D16 到 D25 随任务 W4；D26 随任务 P2（Kubernetes 部署）；D27 随平台 ADR-0003 附录 D 第二阶段的任务 W4（需要脚本的页面）；D28 到 D30 随同一阶段的任务 W6（每日配额、PostgreSQL、来源编号入库）；D31 随同一阶段的任务 W5（PDF） |
+| 状态 | 已接受（2026-11-19，随任务 W1；平台 ADR-0003 附录 C 的阶段 1 计划）；D16 到 D25 随任务 W4；D26 随任务 P2（Kubernetes 部署）；D27 随平台 ADR-0003 附录 D 第二阶段的任务 W4（需要脚本的页面）；D28 到 D30 随同一阶段的任务 W6（每日配额、PostgreSQL、来源编号入库）；D31 随同一阶段的任务 W5（PDF）；D33 随浏览器能力计划的任务 L1-3（渲染后读取） |
 | 范围 | `idp-web` 的技术栈、调用者校验、工具声明、正文提取的接口与规则、地址规则与读取（D6 到 D15，任务 W3）。`ref`、搜索适配器、租户配置、编号、缓存、限流、审计、错误句子（D16 到 D25，任务 W4）；每日配额、数据库与跨副本的编号（D28 到 D30，任务 W6）；PDF 的读取、解析库的选择与子进程的隔离（D31，任务 W5） |
 | 依据 | 平台 ADR-0003（网页搜索与读取）D1、D2；idp-sandbox ADR-0001 D10、D18；idp-mcp ADR-0001 D40、D44；平台 ADR-0003 D4、7.3（T3、T7）、13.1；idp-sandbox ADR-0001 D22；RFC 9309；MCP 2026-07-28 |
 
@@ -48,6 +48,7 @@
 | D30 | **新增依赖：`github.com/jackc/pgx/v5` v5.12.0（许可证 MIT），及它带来的 `github.com/jackc/pgpassfile` v1.0.0、`github.com/jackc/pgservicefile` v0.0.0-20240606120523-5a60cdf6a761、`github.com/jackc/puddle/v2` v2.2.3（都是 MIT）与 `golang.org/x/sync` v0.25.0（BSD-3-Clause，只用到 `semaphore`）** | idp-mcp、idp-host、idp-cmi 用的是同一个驱动同一个版本，idp-web 是第一次有数据库。不用 ORM，SQL 写在 `internal/state`，迁移内嵌（`migrations/`）。链进二进制的只有 `pgx/v5`、`pgxpool` 与上面几个；`go.mod` 里另有 `kr/text`、`rogpeppe/go-internal` 两条 `// indirect`，是 `go mod tidy` 为 pgx 的测试依赖记下的，不进二进制。`govulncheck ./...` 无漏洞。二进制仍是静态的（`CGO_ENABLED=0`），镜像仍是 `FROM scratch` |
 | D31 | **PDF：有文字层的 PDF 读成带 `[page N]` 标记的文本；解析库是 `github.com/go-pdfkit/extract` v0.11.0（BSD-3-Clause），按事先写定的规则从 7 个纯 Go 的候选里选出；解析在子进程 `idp-web-pdf` 里做，自己给自己加时间、内存、系统调用的限制；工具链随之升到 Go 1.27（`go 1.27.1`，`toolchain go1.27.4`）** | 见第 10 节。范围（平台 ADR-0003 附录 D 4.3）：有文字层的 PDF，不做 OCR；扫描件、加密的、损坏的各有自己的错误（`pdf_no_text_layer`、`pdf_encrypted`、`pdf_malformed`），另有 `pdf_too_large`（压缩炸弹或内存上限）、`pdf_too_slow`、`pdf_busy`、`pdf_reader_unavailable`；下载沿用 5 MiB 与 15 秒；最多读 200 页，更长的读前 200 页并在文本开头和首行写明；输出照旧 12 KiB 一段，引用的 `sha256` 仍是交给模型那一段的摘要。**判断是不是 PDF 看字节，不只看标签**：正文以 `%PDF-` 开头就是 PDF（服务器会把它标成 octet-stream、text/plain、text/html 或不标）；标成 `application/pdf` 而内容是 HTML 页面的，按 HTML 读；标成 PDF 而什么也不是的，`pdf_malformed`。其他类型照旧不读、不下载正文。D10 与 D15 里"PDF 暂不支持"（`ErrPDF`）随之取消。测试：`internal/pdfreader`（解析、规则、对抗文件、子进程限制）、`internal/pdfread`（Runner：期限、杀进程组、输出上限、并发、取消、缺程序）、`internal/fetch/pdf_test.go`（类型判断）、`internal/tools/pdf_test.go`（首行、分段、引用、每个错误的句子与原因）、`cmd/idp-web/pdf_test.go`（启动自检、关闭） **补记（跟进）：**文件大小限制为 0 是有意的，所以输出到文件（`> out.txt`）本来只会无声地以 1 结束；现在在施加限制之前检查标准输出与标准错误是不是普通文件，是就以原因词 `unavailable`（不是关于文档的原因，评测的打分程序不认识它）、一句说明要接管道的话和退出码 2 结束；检查之后的写入遇到 EFBIG 同样如此，SIGXFSZ 被忽略（`TestOutputToAFileIsRefusedWithAMessageThatSaysToPipeIt`、`TestAWriteToAFileThatMeetsTheLimitIsReportedAsTheReaderNotTheDocument`、`TestOutputToAPipeIsReadAsBefore`）。 |
 | D32 | **已检查的地址按 Happy Eyeballs（RFC 8305 第 4、5 节）拨号：交错地址族，250 ms 错开，先连上的赢，其余取消、晚到的关闭** | 原来按解析器的顺序一个接一个地拨，第一个地址是不通的 IPv6 时，整个预算（或每个死地址的超时）花在它身上；真实的例子是 www.fedex.com 在没有 IPv6 路由的网络上。检查、不重新解析、代理都没有变。默认 IPv4 先拨，可用 `IDP_WEB_DIAL_FAMILY` 改；细节与反向验证见本文件末尾的“D32”一节。 |
+| D33 | **需要脚本的页面交给渲染器（idp-browser）读一次；租户可列出"总是渲染"的域名；纯文字的拒绝页（S4）在普通读取时就报 `blocked_by_site`** | 计划 `docs/adr/browser-capability-plan.md` 第 3 节与第 8 节选择点 7。**设置**：`IDP_WEB_RENDER_URL`（渲染接口，也是签名的受众，逐字相同；不设：功能关闭，行为与以前完全一样）、`IDP_WEB_RENDER_KEY_FILE`（idp-web 的 P-256 私钥，PEM；设了 URL 而没有可用的密钥是启动错误）、`IDP_WEB_RENDER_TIMEOUT_MS`（缺省 15000）、`IDP_WEB_RENDER_MAX_BYTES`（缺省 5 MiB，渲染器的上限 20 MiB）；启动写一行日志；启动时不调用渲染器（它没起来不是不启动的理由）。租户文件新增 `alwaysRender: [域名]`（与其他名单同样的写法和校验，精确主机或后缀匹配；租户条目整体替换 default；不放行任何名单之外的东西）。**何时渲染**：先照常用普通读取器读（它做全部检查：地址规则、租户名单、robots.txt、配额、缓存，也自己读 PDF 与其他文件）；**只有最终答案是 HTML（`text/html` 或 `application/xhtml+xml`、状态 2xx）时**才可能渲染，PDF、纯文字、其他类型、错误状态页从不交给渲染器（浏览器遇到要下载的文件会报 `render_failed`），实现是读取器的 `fetch.WithHTML` 回调；HTML 且（普通读取判为 `needs_script`（D27），或主机在租户的 `alwaysRender` 里）时渲染**一次**：`POST` 签名请求，取回的 `html` 与 `finalUrl` 走与抓取的页面同一条提取路径（`Reader.FromRendered`：同样的分段、12 KiB、引用的 `finalUrl` 与 SHA-256、同样的 D12、D27、D33 判断）。**渲染后的地址再检查**：浏览器自己跟随重定向，所以 `finalUrl` 要再过地址规则、租户名单与 robots.txt（`Reader.Check`），不过就拒绝，不缓存、不读。**标记**：首行 `(rendered; bytes …)`，引用里 `"rendered": true`，缓存条目带标记（缓存键规则不变：租户加请求的地址）。**列出的主机**渲染失败时，普通读取到的页面照常交给模型（未标记渲染）；非列出的主机渲染失败则是 `needs_script` 的句子，原因记渲染器的码。**签名**：调用者断言（idp-browser ADR-0001 D8）：ES256，`typ idp-caller+jwt`，`kid` 为公钥的 RFC 7638 指纹，`aud` 为配置的 URL，`sub` 为 `idp-web`，有效 30 秒，`jti` 随机，`req` 为 `sha256(METHOD "\n" PATH "\n" body)`，`Authorization: Bearer`。**客户端**：不走代理、不跟随重定向、响应有上限、时限为渲染器的时限加 5 秒（只切断一个根本不答复的渲染器，报 `render_timeout`）。**配额**：一次调用最多渲染一次，渲染与前面的普通读取合起来是一次读取（一份窗口额度、一份每日额度，由 `read` 里取到的那一份承担），没有"渲染的第二份"。**S4**：普通读取时，HTTP 200（或 403、429、503）的页面，可见文字不超过 1000 字且含拒绝的话（FedEx/Akamai "It appears you don't have permission to view this webpage"、Akamai "Reference #…"、Incapsula 等），答 `blocked_by_site`，不再当作成功读取（在 www.fedex.com 上发现）；**从 idp-browser 的 `detect.go` 复制的只有 S4**（`refusalMarkers`、`akamaiRef`、1000 字的界），原因：它只需要可见文字、没有浏览器也可靠；S1 到 S3（挑战页的标记）D12 已覆盖，其余的（HUMAN、DataDome、Imperva、阿里云、GeeTest 的 HTML 标记）没有复制：没有浏览器时那样的页面只是一段脚本和一个空框，D12 与 D27 已拦住，渲染器才分得清；S5（光秃秃的 403 或 429）本来就是 `http_status`。 | 结果与原因（审计 `reason`；模型读到的句子）见本文件末尾"D33"一节的表。渲染器宕机不影响任何其他读取。 |
 
 ## 3. D5 的细节（任务 W2）
 
@@ -414,3 +415,58 @@ D13 的根证书本身不是单元测试能证明的：见任务报告里在镜�
 | `prefer-ipv4` 也从第一个地址的族开始（等于 `dual`） | `TestReadUsesIPv4WhenIPv6ConnectsAndThenStalls`、`TestPreferIPv4NeverLetsAStallingIPv6PathWin`、`TestEachFamilySettingGivesItsOrder` |
 | `ipv4-only` 不丢掉 IPv6 | `TestEachFamilySettingGivesItsOrder`、`TestAFamilyWithNoAddressIsAnErrorWithoutDialing` |
 | 去掉验证 | `TestDialFamilySettingIsValidated`；启动时 `fetch.ParseDialFamily` 出错即 `fatal`，并记一行日志 |
+
+## 反向验证与细节（D33，渲染后读取，任务 L1-3）
+
+**结果与原因。**模型读到的句子只有两种：`needs_script` 的句子（"the content of this page is produced by script and cannot be read now: use another source, or the excerpt of the search result"）和新的 `blocked_by_site` 的句子（"the site refused to show this page to an automated reader: use another source"）。运维看审计的 `reason`、`render`（本次调用渲染的结果，没渲染为空）、`rendered`（给出的文字是否来自渲染，缓存命中也算）、`renderMs`（渲染器报的毫秒；没有答复时是我们量的）和指标 `idp_web_renders_total{outcome}`、`idp_web_render_seconds_total`。
+
+| 情形 | 模型读到 | 审计 `reason` | `render`（指标 outcome） | 读取是否计数 |
+|---|---|---|---|---|
+| 渲染成功 | 页面，首行有 `rendered;` | `ok` | `ok` | 一次 |
+| 渲染后仍是框架页（D27 的规则） | `needs_script` 句子 | `render_failed` | `thin` | 一次 |
+| 渲染器 `blocked_by_site`，或渲染后的页面是挑战页或拒绝页 | `blocked_by_site` 句子 | `blocked_by_site` | `blocked_by_site` | 一次 |
+| `render_busy`、`render_timeout`、`render_failed`、`not_allowed`、`invalid_request`、`unauthorized` | `needs_script` 句子 | 同码 | 同码 | 一次（普通读取已发出） |
+| 渲染器没有答复（连不上、断开） | `needs_script` 句子 | `render_unreachable` | `render_unreachable` | 一次 |
+| 渲染器挂住 | `needs_script` 句子 | `render_timeout` | `render_timeout` | 一次 |
+| 渲染后停在租户不可读的地址（名单、robots.txt、非公网） | 对应的拒绝句子（`domain_excluded`、`robots`、`address_not_public` …） | 对应的原因 | `refused` | 一次 |
+| 渲染的主页状态码 ≥ 400 | `http_status` 的句子 | `http_status` | `http_status` | 一次 |
+| 列出的主机，渲染失败（任何码），而普通读取是页面 | 普通读取的页面，不标记渲染 | `ok` | 渲染的结果码（审计 `render`） | 一次 |
+| 普通读取是 S4 的拒绝页 | `blocked_by_site` 句子，**不渲染** | `blocked_by_site` | （无） | 一次 |
+| PDF、纯文字、其他类型、错误状态页（含列出的主机） | 普通读取的结果，**不渲染** | 照旧 | （无） | 照旧 |
+| 没配置渲染器 | 与以前相同 | `needs_script` | （无） | 照旧 |
+
+说明：因为总是先做普通读取，渲染器从不早于普通读取的连接，所以"渲染前就退回额度"的情形不存在；渲染器答复的 `Sent` 标志（`not_allowed`、`invalid_request`、`unauthorized`、`render_busy` 为否）只在客户端的单元测试里验证，供以后不先做普通读取的路径用。`alwaysRender` 的代价是列出的 HTML 页要抓两次（普通一次，渲染一次，一份额度）。
+
+**反向验证（2026-11-24）。**每项去掉后，下列测试失败，恢复后全过（`make test`；脚本逐项做，输出在任务报告里）：
+
+| 去掉 | 失败的测试 |
+|---|---|
+| 签名的受众不是配置的 URL | `TestASignedRequestIsAcceptedByTheRenderersVerifier…`、`TestEachCodeOfTheRendererIsAnError…`（验证方复制自 idp-browser，拒绝它） |
+| 摘要的路径不对 | 同上 |
+| 主体不是 `idp-web` | `TestVectors`、同上 |
+| 断言有效期一小时 | `TestVectors`、`TestTheRenderersVerifierRefuses…` |
+| 客户端没有时限 | `TestARendererThatHangsIsCutOffAtTheLimitAndTheMargin`（2.2 秒、返回的码不对） |
+| 接受超过上限的 HTML | `TestEachCodeOfTheRendererIsAnError…`（"too large html"） |
+| `needs_script` 不渲染 | `TestAPageThatNeedsScriptIsRenderedOnce…` 等 6 个 |
+| `alwaysRender` 不起作用 | `TestAlwaysRenderRendersTheListedHost…`、`TestARendererThatIsDownOrFailingFailsNothingElse` |
+| `alwaysRender` 对所有主机起作用 | `TestAlwaysRenderRenders…`、`TestAPageThatNeedsScriptIsRenderedOnce…` |
+| 不检查 HTML 就渲染（去掉 `fetch.WithHTML` 的判断） | `TestOnlyHTMLIsEverSentToTheRenderer` |
+| `WithHTML` 在判断类型之前就调用（PDF 也算 HTML） | `TestWithHTMLIsCalledOnlyForAnAnswerReadAsAnHTMLPage` |
+| 渲染失败后再渲染一次 | `TestAToolCallRendersAtMostOnce` 等 4 个 |
+| 渲染后的地址不查租户名单与 robots.txt | `TestAPageThatEndedWhereTheTenantMayNotReadIsRefused…`（名单与 robots 是两个子情形；去掉整段检查与只去掉 robots 一项都失败） |
+| 渲染后仍是框架页不记 `render_failed` | `TestAPageThatIsStillAFrameAfterRendering…` |
+| 渲染器的 `blocked_by_site` 当作 `needs_script` | `TestEachRendererErrorIsTheRightOutcomeAndAuditReason` |
+| 丢掉渲染器的码（原因一律 `render_failed`） | 同上、`TestARendererThatHangsIsBoundedBy…` |
+| 渲染的页面不标记 | `TestFromRenderedExtractsLike…`、`TestAPageThatNeedsScriptIsRenderedOnce…`、`TestARenderedPageIsCached…` |
+| 首行不写 `rendered;` | 同上三个、`TestAlwaysRender…` |
+| 引用没有 `rendered` 字段 | `TestAPageThatNeedsScriptIsRenderedOnce…`、`TestARenderedPageIsCached…` 等 |
+| 审计的 `rendered` 恒为 false | `TestAPageThatNeedsScriptIsRenderedOnce…`、`TestARenderedPageIsCached…`（缓存命中也标记） |
+| 渲染多扣一份额度 | `TestARenderCountsAsOneReadOnceInTheDailyQuotaAndTheWindow`、`TestARenderedPageIsCached…` |
+| 普通读取不识别 S4 | `TestAnAccessDeniedPageThatAnswers200IsBlockedBySiteNotAPage`、`TestASoftBlockOnThePlainPath…`、`TestFromRendered…` |
+| S4 不看错误状态页（403） | `TestAnAccessDeniedPageThatAnswers200…` |
+| S4 去掉 1000 字的界 | `TestTheRefusalTextIsTheOneIdpBrowserReportsAsS4…`（长文章引用拒绝的话） |
+| `Check` 不查 robots.txt | `TestCheckAppliesTheAddressRules…` 与读取的 robots 测试 |
+| `alwaysRender` 只精确匹配 | `TestAlwaysRenderNamesDomainsAndTheirSubdomains…` |
+| URL 没有密钥也能启动 | `TestAURLWithoutAUsableKeyOr…` |
+
+**已知差距。**（1）`alwaysRender` 的 HTML 页抓两次。（2）渲染的是匿名、无 Cookie 的页面，需要登录的页面不在范围内（计划第 3 节）。（3）没有给渲染器的 NetworkPolicy 出口、Secret 与环境变量：属于平台验收（L1-4）。

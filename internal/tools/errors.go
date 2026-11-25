@@ -77,6 +77,8 @@ type mapping struct {
 	text string
 }
 
+const needsScriptText = "the content of this page is produced by script and cannot be read now: use another source, or the excerpt of the search result"
+
 const search1 = "search first and use the address and ref exactly as listed"
 
 // mappings is the table from each sentinel of fetch, refs, tenants, search and addr to the sentence the model reads,
@@ -121,7 +123,9 @@ var mappings = []mapping{
 	{fetch.ErrPDFBusy, "pdf_busy", decisionFailed, "the PDF reader is busy with other documents: try again in a little while, or use another source"},
 	{fetch.ErrEncoding, "encoding", decisionFailed, ""},
 	{fetch.ErrBotCheck, "bot_check", decisionFailed, ""},
-	{fetch.ErrNeedsScript, "needs_script", decisionFailed, "the content of this page is produced by script and cannot be read now: use another source, or the excerpt of the search result"},
+	{fetch.ErrNeedsScript, "needs_script", decisionFailed, needsScriptText},
+	// the site refused in words, or the renderer said so (D33): a reason that may pass, so another source is the remedy
+	{fetch.ErrBlockedBySite, "blocked_by_site", decisionFailed, "the site refused to show this page to an automated reader: use another source"},
 	{fetch.ErrStatus, "http_status", decisionFailed, ""},
 	{fetch.ErrTooManyRedirects, "redirects", decisionFailed, ""},
 	{fetch.ErrConnect, "connect", decisionFailed, ""},
@@ -131,6 +135,12 @@ var mappings = []mapping{
 // classify finds the sentence for err. An error that is in no row is an internal one: the model gets one generic
 // sentence, and the caller logs the detail.
 func classify(err error) (outcome, bool) {
+	// a page that needed the renderer and did not get it: the model reads the needs_script sentence, whatever the reason
+	// was, and the audit and the counter get the renderer's code (render_busy, render_failed, ...) (D33)
+	var rf *renderFailure
+	if errors.As(err, &rf) {
+		return outcome{needsScriptText, rf.code, decisionFailed}, true
+	}
 	for _, m := range mappings {
 		if errors.Is(err, m.target) {
 			text := m.text
@@ -150,3 +160,12 @@ func classify(err error) (outcome, bool) {
 }
 
 const genericText = "the web tool failed to complete the request"
+
+// renderFailure is a read that the plain reader answered with ErrNeedsScript (or that was to be rendered first) and
+// that the renderer did not turn into a page. It is ErrNeedsScript for everyone who asks, and carries why in code.
+type renderFailure struct{ code string }
+
+func (e *renderFailure) Error() string {
+	return fetch.ErrNeedsScript.Error() + " (the renderer: " + e.code + ")"
+}
+func (e *renderFailure) Is(target error) bool { return target == fetch.ErrNeedsScript }

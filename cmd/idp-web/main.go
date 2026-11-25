@@ -14,6 +14,9 @@
 //	                          Set both or neither. Neither: the forwarded caller is taken as it arrives, and only the
 //	                          private network vouches for it
 //
+//	IDP_WEB_RENDER_URL        the renderer (idp-browser) for pages that need script, ADR-0001 D33; unset: nothing is rendered.
+//	                          With IDP_WEB_RENDER_KEY_FILE (required), IDP_WEB_RENDER_TIMEOUT_MS and IDP_WEB_RENDER_MAX_BYTES
+//
 //	IDP_WEB_PROVIDER          the search service: fixture, exa or brave. Required
 //	IDP_WEB_EXA_KEY_FILE      exa: file holding the API key (required for exa)
 //	IDP_WEB_EXA_BASE_URL      exa: the API's address, https only (default https://api.exa.ai; the EU endpoint is
@@ -98,6 +101,8 @@ type metrics struct {
 	nanos   map[string]int64
 	refused map[[2]string]int64
 	failed  map[[2]string]int64
+	renders map[string]int64
+	renderN int64
 }
 
 func (m *metrics) Observe(tool, outcome string, d time.Duration) {
@@ -122,6 +127,18 @@ func (m *metrics) Failed(tool, reason string) {
 		m.failed = map[[2]string]int64{}
 	}
 	m.failed[[2]string{tool, reason}]++
+	m.mu.Unlock()
+}
+
+// Rendered counts a render by outcome (ADR-0001 D33): ok, thin (rendered and still a frame), refused (it ended where the
+// tenant may not read) and the renderer's reason codes.
+func (m *metrics) Rendered(outcome string, d time.Duration) {
+	m.mu.Lock()
+	if m.renders == nil {
+		m.renders = map[string]int64{}
+	}
+	m.renders[outcome]++
+	m.renderN += d.Nanoseconds()
 	m.mu.Unlock()
 }
 
@@ -172,6 +189,17 @@ func (m *metrics) write(w http.ResponseWriter) {
 	for _, k := range fk {
 		fmt.Fprintf(w, "idp_web_failed_total{tool=%q,reason=%q} %d\n", k[0], k[1], m.failed[k])
 	}
+	fmt.Fprintln(w, "# TYPE idp_web_renders_total counter")
+	ro := make([]string, 0, len(m.renders))
+	for k := range m.renders {
+		ro = append(ro, k)
+	}
+	sort.Strings(ro)
+	for _, k := range ro {
+		fmt.Fprintf(w, "idp_web_renders_total{outcome=%q} %d\n", k, m.renders[k])
+	}
+	fmt.Fprintln(w, "# TYPE idp_web_render_seconds_total counter")
+	fmt.Fprintf(w, "idp_web_render_seconds_total %g\n", float64(m.renderN)/1e9)
 	fmt.Fprintln(w, "# TYPE idp_web_call_seconds_total counter")
 	tn := make([]string, 0, len(m.nanos))
 	for k := range m.nanos {
@@ -249,10 +277,14 @@ func main() {
 		fatal(err)
 	}
 	log.Info("configured", "pdf", pdf != nil, "provider", cfg.providerName, "tenants", cfg.tenants.Count(), "database", cfg.store != nil, "dailyLimited", len(cfg.tenants.DailyLimited()), "searches", cfg.limits.Searches, "reads", cfg.limits.Reads, "windowSeconds", int(cfg.limits.Window.Seconds()))
+	renderer, err := startRenderer(os.Getenv, cfg.tenants, log)
+	if err != nil {
+		fatal(err)
+	}
 	met := &metrics{counts: map[[2]string]int64{}, nanos: map[string]int64{}, refused: map[[2]string]int64{}, failed: map[[2]string]int64{}}
 	srv := mcp.New("idp-web", version,
 		"Searches the web and reads pages: web_search returns results with a ref, web_fetch reads a result with its ref, web_open_url reads an address the member gave and needs the member's confirmation.",
-		tools.New(tools.Config{Log: log, Metrics: met, RequireCaller: requireCaller, Provider: cfg.provider, Reader: newReader(log, testOrigins, dialFamily, pdf),
+		tools.New(tools.Config{Log: log, Metrics: met, RequireCaller: requireCaller, Provider: cfg.provider, Reader: newReader(log, testOrigins, dialFamily, pdf), Renderer: renderer,
 			Keys: cfg.keys, Tenants: cfg.tenants, State: st, TestOrigins: testOrigins, Limits: cfg.limits}))
 	srv.Log = log
 

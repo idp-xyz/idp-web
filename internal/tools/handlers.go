@@ -37,7 +37,9 @@ type citation struct {
 	// runtime that keeps the first address it sees for a number never sees a second one. Absent when there was no redirect.
 	FinalURL  string `json:"finalUrl,omitempty"`
 	FetchedAt string `json:"fetchedAt,omitempty"`
-	SHA256    string `json:"sha256,omitempty"`
+	// Rendered: the text is that of the page after a browser ran its script (ADR-0001 D33), not of the HTML the site sent.
+	Rendered bool   `json:"rendered,omitempty"`
+	SHA256   string `json:"sha256,omitempty"`
 }
 
 // search is web_search: the results of the provider that the tenant's rules allow, each with its number and its ref.
@@ -231,9 +233,11 @@ func (a *api) read(ctx context.Context, tool string, caller mcp.Caller, pol tena
 		if err != nil {
 			return a.fail(tool, au, err)
 		}
+		// A render is a read too, and is counted by the unit taken here, once per call: the plain read that comes before
+		// it, and the render, are one read. The unit is given back only if neither sent anything (D33).
 		var dialed atomic.Bool
 		rctx := fetch.WithDialed(fetch.WithAllow(ctx, pol.AllowHost), func() { dialed.Store(true) })
-		page, err := a.cfg.Reader.Read(rctx, u)
+		page, err := a.loadPage(ctx, rctx, t.Host, u, pol, au, &dialed)
 		if err != nil {
 			if !dialed.Load() {
 				release()
@@ -243,6 +247,7 @@ func (a *api) read(ctx context.Context, tool string, caller mcp.Caller, pol tena
 		c = cached{page: page, fetchedAt: a.cfg.Now().UTC()}
 		a.cache.put(caller.Tenant, u, c)
 	}
+	au.rendered = c.page.Rendered
 	part, next, total := extract.Page(c.page.Text, offset, 0)
 	au.bytes = len(part)
 	nums, err := a.numbers.Number(ctx, caller.Owner(), []string{u}, a.cfg.Now())
@@ -281,6 +286,9 @@ func (a *api) read(ctx context.Context, tool string, caller mcp.Caller, pol tena
 		}
 		what += "; "
 	}
+	if c.page.Rendered {
+		what += "rendered; " // so that the model knows the text is what a browser showed, and a member reading the sources too
+	}
 	head := fmt.Sprintf("[%d] %s%s (%sbytes %d–%d of %d", n, title, redirected, what, start, start+len(part), total)
 	if next >= 0 {
 		head += fmt.Sprintf("; the rest: %s with offset %d)", tool, next)
@@ -296,5 +304,5 @@ func (a *api) read(ctx context.Context, tool string, caller mcp.Caller, pol tena
 	}
 	sum := sha256.Sum256([]byte(part))
 	return mcp.Result{Text: head + "\n\n" + body, Structured: map[string]any{"citations": []citation{{
-		N: n, Title: title, URL: u, FinalURL: final, FetchedAt: c.fetchedAt.Format(time.RFC3339), SHA256: hex.EncodeToString(sum[:])}}}}
+		N: n, Title: title, URL: u, FinalURL: final, FetchedAt: c.fetchedAt.Format(time.RFC3339), Rendered: c.page.Rendered, SHA256: hex.EncodeToString(sum[:])}}}}
 }

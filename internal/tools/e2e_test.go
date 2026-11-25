@@ -105,6 +105,8 @@ type world struct {
 	keys   *refs.Keys
 	prov   *countingProvider
 	cfg    Config
+	// renderer is what the tools were given to render with, nil when none
+	renderer Renderer
 
 	mu   sync.Mutex
 	hits map[string]int // by path
@@ -133,6 +135,8 @@ type options struct {
 	limits   Limits
 	provider func(fixture search.Provider) search.Provider
 	reader   Reader
+	renderer Renderer
+	pdf      fetch.PDFReader
 }
 
 func newWorld(t *testing.T, o ...options) *world {
@@ -149,7 +153,26 @@ func newWorld(t *testing.T, o ...options) *world {
 		w.mu.Unlock()
 		switch r.URL.Path {
 		case "/robots.txt", "/missing-robots":
+			if strings.HasPrefix(r.Host, "robots.test:") { // the one host that forbids every robot (the renderer tests)
+				io.WriteString(rw, "User-agent: *\nDisallow: /\n")
+				return
+			}
 			http.NotFound(rw, r)
+		case "/spa": // a frame whose article script writes: needs script
+			rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+			io.WriteString(rw, `<!doctype html><html><head><title>App</title></head><body><nav><a href="/">Home</a></nav><div id="root"></div><script src="/app.js"></script></body></html>`)
+		case "/fedex": // a soft block: HTTP 200 and a refusal in words
+			rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+			io.WriteString(rw, `<!doctype html><html><head><title>FedEx</title></head><body><div><h1>We're sorry, we can't process your request right now.</h1><p>It appears you don't have permission to view this webpage.</p><p>Incident Number: 0.11a6b4d.1795089600.5f2c</p></div></body></html>`)
+		case "/file.pdf":
+			rw.Header().Set("Content-Type", "application/pdf")
+			io.WriteString(rw, "%PDF-1.4 not really")
+		case "/notes.txt":
+			rw.Header().Set("Content-Type", "text/plain")
+			io.WriteString(rw, "Plain notes about parcels.")
+		case "/blob":
+			rw.Header().Set("Content-Type", "application/zip")
+			io.WriteString(rw, "PK")
 		case "/go":
 			http.Redirect(rw, r, "http://blocked.test:"+w.port+"/page", http.StatusFound)
 		case "/gone":
@@ -164,13 +187,16 @@ func newWorld(t *testing.T, o ...options) *world {
 	t.Cleanup(w.origin.Close)
 	w.port = w.origin.Listener.Addr().String()[strings.LastIndex(w.origin.Listener.Addr().String(), ":")+1:]
 	origins := map[string]bool{}
-	for _, h := range []string{"allowed.test", "blocked.test", "other.test", "127.0.0.1"} {
+	for _, h := range []string{"allowed.test", "blocked.test", "other.test", "127.0.0.1", "rendered.test", "robots.test"} {
 		origins[h+":"+w.port] = true
 	}
 	log := slog.New(slog.NewJSONHandler(w.log, nil))
-	var reader Reader = fetch.New(fetch.Config{Resolver: resolver{}, TestOrigins: origins, Version: "test", Log: slog.New(slog.DiscardHandler)})
+	var reader Reader = fetch.New(fetch.Config{Resolver: resolver{}, TestOrigins: origins, Version: "test", Log: slog.New(slog.DiscardHandler), PDF: opt.pdf})
 	if opt.reader != nil {
 		reader = opt.reader
+	}
+	if opt.renderer != nil {
+		w.renderer = opt.renderer
 	}
 	u := func(host, path string) string { return fmt.Sprintf("http://%s:%s%s", host, w.port, path) }
 	fx, err := search.ParseFixture([]byte(fmt.Sprintf(`
@@ -222,7 +248,7 @@ entries:
 	}
 	w.keys = keys.WithClock(w.clk.now)
 	w.cfg = Config{Log: log, Metrics: w.met, RequireCaller: true, Provider: prov, Reader: reader, Keys: w.keys,
-		Tenants: set, State: opt.state, TestOrigins: origins, Limits: opt.limits, Now: w.clk.now}
+		Tenants: set, State: opt.state, Renderer: w.renderer, TestOrigins: origins, Limits: opt.limits, Now: w.clk.now}
 	w.srv = mcp.New("idp-web", "test", "", New(w.cfg))
 	return w
 }
@@ -757,7 +783,7 @@ func TestEverySentinelHasAFixedSentence(t *testing.T) {
 		search.ErrUnavailable, search.ErrBusy,
 		fetch.ErrNotPublic, fetch.ErrRobots, fetch.ErrTooLarge, fetch.ErrTooSlow, fetch.ErrType, fetch.ErrEncoding,
 		fetch.ErrPDFNoText, fetch.ErrPDFEncrypted, fetch.ErrPDFMalformed, fetch.ErrPDFTooLarge, fetch.ErrPDFTooSlow, fetch.ErrPDFUnavailable, fetch.ErrPDFBusy,
-		fetch.ErrBotCheck, fetch.ErrNeedsScript, fetch.ErrStatus, fetch.ErrTooManyRedirects, fetch.ErrConnect, fetch.ErrUnreadable,
+		fetch.ErrBotCheck, fetch.ErrBlockedBySite, fetch.ErrNeedsScript, &renderFailure{code: "render_busy"}, fetch.ErrStatus, fetch.ErrTooManyRedirects, fetch.ErrConnect, fetch.ErrUnreadable,
 		fmt.Errorf("%w: the scheme %q is not http or https", errAddrRefused(), "ftp"),
 	} {
 		o, known := classify(err)

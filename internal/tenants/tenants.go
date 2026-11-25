@@ -33,6 +33,10 @@ type Policy struct {
 	ExcludeDomains []string
 	// OpenURL allows web_open_url. Off unless the file says so (appendix C 2 item 2).
 	OpenURL bool
+	// AlwaysRender: pages of these domains and their subdomains are read through the renderer first, instead of by the
+	// plain reader (ADR-0001 D33). Empty: only a page that needs script is rendered. It names domains a tenant knows to
+	// need a browser; it allows nothing the lists above do not, and does nothing when no renderer is configured.
+	AlwaysRender []string
 	// DailySearches and DailyReads are how many searches and page reads that go out to the web the tenant may make in a UTC
 	// day (ADR-0001 D28). nil means no limit, and then the database is not asked; 0 means none at all. Use Daily.
 	DailySearches, DailyReads *int
@@ -63,6 +67,7 @@ type rawPolicy struct {
 	IncludeDomains []string     `yaml:"includeDomains"`
 	ExcludeDomains []string     `yaml:"excludeDomains"`
 	OpenURL        bool         `yaml:"openUrl"`
+	AlwaysRender   []string     `yaml:"alwaysRender"`
 	DailySearches  *wholeNumber `yaml:"dailySearches"`
 	DailyReads     *wholeNumber `yaml:"dailyReads"`
 }
@@ -158,6 +163,9 @@ func (r rawPolicy) policy() (Policy, error) {
 	if p.ExcludeDomains, err = normalize(r.ExcludeDomains); err != nil {
 		return p, fmt.Errorf("excludeDomains: %w", err)
 	}
+	if p.AlwaysRender, err = normalize(r.AlwaysRender); err != nil {
+		return p, fmt.Errorf("alwaysRender: %w", err)
+	}
 	return p, nil
 }
 
@@ -186,6 +194,33 @@ func (s *Set) For(tenant string) Policy {
 		return p
 	}
 	return s.def
+}
+
+// RendersFirst says whether a page of host is read through the renderer before anything else (alwaysRender): the host is
+// one of the listed domains or a subdomain of one.
+func (p Policy) RendersFirst(host string) bool {
+	for _, d := range p.AlwaysRender {
+		if covers(d, host) {
+			return true
+		}
+	}
+	return false
+}
+
+// AlwaysRenders names the entries of the file that set alwaysRender ("default" for the default), sorted: with no
+// renderer configured they do nothing, and the service says so at start.
+func (s *Set) AlwaysRenders() []string {
+	var out []string
+	if len(s.def.AlwaysRender) > 0 {
+		out = append(out, "default")
+	}
+	for id, p := range s.tenants {
+		if len(p.AlwaysRender) > 0 {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // DailyLimited names the entries of the file that set a daily limit ("default" for the default), sorted: a deployment with

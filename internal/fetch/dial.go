@@ -21,6 +21,16 @@ func WithDialed(ctx context.Context, fn func()) context.Context {
 	return context.WithValue(ctx, dialedKey{}, fn)
 }
 
+type htmlKey struct{}
+
+// WithHTML returns a context whose reads call fn when the final answer is a success whose body is read as an HTML page
+// (text/html or application/xhtml+xml, a body that merely starts with %PDF- excluded), before it is extracted. A PDF, plain
+// text, another type, an error status and a read that failed earlier never call it. idp-web renders only what called it: the
+// renderer is a browser, and a browser given a file it would download answers render_failed (D33).
+func WithHTML(ctx context.Context, fn func()) context.Context {
+	return context.WithValue(ctx, htmlKey{}, fn)
+}
+
 // Dialing tells the call's WithDialed function, if it has one, that a connection to the web is about to be made. The reader
 // does it; anything that stands in for the reader (a test double) does it when it means to have gone out.
 func Dialing(ctx context.Context) {

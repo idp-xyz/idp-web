@@ -32,6 +32,9 @@ type Metrics interface {
 	Observe(tool, outcome string, d time.Duration)
 	Refused(tool, reason string)
 	Failed(tool, reason string)
+	// Rendered counts a render by outcome ("ok", "thin", "refused" or a reason code of the renderer) and the time it took
+	// (ADR-0001 D33).
+	Rendered(outcome string, d time.Duration)
 }
 
 // Reader is the page reader (internal/fetch.Reader).
@@ -91,6 +94,9 @@ type Config struct {
 	Reader   Reader
 	Keys     *refs.Keys
 	Tenants  *tenants.Set
+	// Renderer renders the pages that need script and those of a tenant's alwaysRender domains (ADR-0001 D33). Nil: no
+	// page is rendered. The Reader must also be a Rendering, or none is.
+	Renderer Renderer
 	// State is the database; nil means none (numbering in memory, and a tenant with a daily limit is refused).
 	State State
 	// TestOrigins are exempt from the address rules, for tests only (ADR-0001 D14); the same set the reader has.
@@ -114,18 +120,26 @@ type api struct {
 	numbers numberer
 	cache   *pageCache
 	limits  *limiter
+	// renderer and rendering are set together or not at all
+	renderer  Renderer
+	rendering Rendering
 }
 
 // audit is what one call says about itself (appendix C 4.7, ADR-0001 D23). It holds the query and the address in clear,
 // because they are what leaves the enterprise, and never the ref, a key or page text.
 type audit struct {
-	tenant   string
-	query    string
-	url      string
-	results  int
-	dropped  int
-	bytes    int
-	cache    bool
+	tenant  string
+	query   string
+	url     string
+	results int
+	dropped int
+	bytes   int
+	cache   bool
+	// rendered: the text given is that of a rendered page (also from the cache); render is the outcome of the render this
+	// call made ("" when it made none); renderMS the renderer's time for it (ours when it gave none)
+	rendered bool
+	render   string
+	renderMS int64
 	decision string
 	reason   string
 }
@@ -200,7 +214,7 @@ func (a *api) wrap(name string, h handler) func(*http.Request, map[string]json.R
 		a.met.Observe(name, outcome, d)
 		a.log.Info("audit", "tool", name, "outcome", outcome, "ms", d.Milliseconds(), "tenant", au.tenant,
 			"caller", short(caller.Owner()), "query", au.query, "url", au.url, "results", au.results, "dropped", au.dropped,
-			"bytes", au.bytes, "cache", au.cache, "decision", au.decision, "reason", au.reason)
+			"bytes", au.bytes, "cache", au.cache, "rendered", au.rendered, "render", au.render, "renderMs", au.renderMS, "decision", au.decision, "reason", au.reason)
 		return res
 	}
 }
@@ -274,6 +288,13 @@ func New(cfg Config) []mcp.Tool {
 	a := &api{cfg: cfg, log: cfg.Log, met: cfg.Metrics,
 		sources: newSources(cfg.Now), cache: newPageCache(cfg.Now, cfg.CacheEntries, cfg.CacheBytes),
 		limits: newLimiter(cfg.Now, cfg.Limits.Window, map[string]int{"searches": cfg.Limits.Searches, "reads": cfg.Limits.Reads})}
+	if cfg.Renderer != nil {
+		if rd, ok := cfg.Reader.(Rendering); ok {
+			a.renderer, a.rendering = cfg.Renderer, rd
+		} else {
+			cfg.Log.Error("a renderer is configured but the reader cannot check and extract rendered pages: nothing is rendered")
+		}
+	}
 	a.numbers = a.sources
 	if cfg.State != nil {
 		a.numbers = cfg.State

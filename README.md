@@ -50,6 +50,10 @@ CI 里的第三方镜像（扫描用的 trivy）先由 `deploy/pull-image.sh` �
 | `IDP_WEB_PDF_READER` | 与 `idp-web` 同目录的 `idp-web-pdf` | PDF 读取程序的路径；启动时用一份内置的小 PDF 试跑一次，找不到、起不来、读不出就当作"PDF 不可用"并在日志里写明（服务照常启动） |
 | `IDP_WEB_PDF_CONCURRENCY` | `2` | 同时运行的 PDF 读取进程数；满了的调用最多等 2 秒，再回答 `pdf_busy`。每个进程最多 192 MiB，所以容器内存上限要留出余量（清单里是 1 GiB） |
 | `IDP_WEB_DIAL_FAMILY` | `prefer-ipv4` | `prefer-ipv4`（默认）、`dual`、`ipv4-only`、`ipv6-only`：检查过的地址按哪些地址族拨、哪个先拨（ADR-0001 D32）。默认 IPv4 先拨，IPv6 晚 250 ms 才开始；`dual` 是 RFC 8305 原样（解析器的第一个族先拨）；`ipv4-only` / `ipv6-only` 在拨号前丢掉另一个族，没有剩下的地址就按“无地址”报连接错误。不认识的值启动失败，启动时记一行日志 |
+| `IDP_WEB_RENDER_URL` | 空 | 渲染器（idp-browser）的渲染接口，如 `http://idp-browser.idp-browser.svc.cluster.local:8590/render`；**也是签名的受众，要与渲染器验证时用的地址逐字相同**。不设：不渲染，行为与以前完全一样（ADR-0001 D33）。要读靠脚本生成正文的页面（`needs_script`）才设 |
+| `IDP_WEB_RENDER_KEY_FILE` | 空 | idp-web 签请求用的 P-256 私钥（PEM，PKCS#8 或 SEC1），渲染器持有对应的公钥；设了 URL 而没有它，启动即退出（2） |
+| `IDP_WEB_RENDER_TIMEOUT_MS` | `15000` | 渲染器渲染一页最多用多久；idp-web 再多等 5 秒才放弃一个不答复的渲染器 |
+| `IDP_WEB_RENDER_MAX_BYTES` | `5242880` | 渲染器交回的 HTML 最多多少字节（渲染器的上限 20 MiB，下限 1 KiB） |
 | `IDP_WEB_TEST_ORIGINS` | 空 | 只用于测试：免检的 `主机:端口`（ADR-0001 D14） |
 | `IDP_WEB_REQUIRE_CALLER` | `true` | 请求必须带调用者；`false` 只用于单机开发 |
 | `IDP_WEB_PROVIDER` | **必填** | 搜索服务：`fixture`、`exa`、`brave`；没设，或它的密钥或文件缺失，启动即退出（2） |
@@ -81,6 +85,7 @@ tenants:
     openUrl: false                 # web_open_url，缺省为关
     dailySearches: 200             # 每个 UTC 日这个租户最多搜索几次；不写：不限；0：一次都不允许
     dailyReads: 600                # 同上，真正发往网站的读取（缓存命中的不算）
+    alwaysRender: [spa.example.com]   # 这些域名（含子域名）的 HTML 页总是交给渲染器读；其余的只在 needs_script 时渲染；没配置渲染器时无效
   labs: {enabled: true, openUrl: true}
 ```
 
@@ -116,9 +121,13 @@ curl -s localhost:8580/mcp -H 'MCP-Protocol-Version: 2026-07-28' -H 'Content-Typ
 
 再用结果里的地址与 `ref` 调 `web_fetch`。
 
+## 渲染后读取
+
+配置了 `IDP_WEB_RENDER_URL`，读到的页面是 HTML 而又被判为 `needs_script`（正文由脚本生成，D27），或主机在租户的 `alwaysRender` 里，idp-web 会让渲染器（idp-browser，一个浏览器）把页面跑一遍，再按同样的方式提取、分段、引用。渲染过的页面首行有 `rendered;`，引用里有 `"rendered": true`。PDF 和其他文件从不交给渲染器；一次调用最多渲染一次，算一次读取；渲染器宕机只影响需要它的读取。网站明说不给自动读取的页面（验证码、Akamai 的 "you don't have permission" 一类，渲染器与普通读取都能认出）回答"网站拒绝向自动读取者显示这个页面：换一个来源"（`blocked_by_site`）。细节与原因对照表见 ADR-0001 D33。
+
 ## 日志与指标
 
-日志是标准输出上的 JSON（slog）；每次工具调用一行 `"msg":"audit"`：工具、结果、耗时、租户、调用者的短哈希（不记成员标识本身）、查询词与地址（明文，它们就是外发的内容）、返回与丢弃的结果数、字节数、决定与原因。**没有 `ref`、密钥和页面文字**（ADR-0001 D23）。
+日志是标准输出上的 JSON（slog）；每次工具调用一行 `"msg":"audit"`：工具、结果、耗时、租户、调用者的短哈希（不记成员标识本身）、查询词与地址（明文，它们就是外发的内容）、返回与丢弃的结果数、字节数、是否来自缓存、`rendered`（文字是否来自渲染）、`render`（本次调用渲染的结果，没渲染为空）、`renderMs`、决定与原因。**没有 `ref`、密钥和页面文字**（ADR-0001 D23）。
 
 ## 已知差距
 

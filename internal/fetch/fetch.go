@@ -48,15 +48,18 @@ var (
 	ErrTooSlow   = errors.New("the site did not deliver the page within 15 seconds")
 	ErrType      = errors.New("the content type is not read")
 	// The PDF reader's errors (ADR-0001 D31): the same values, so that errors.Is works across the packages.
-	ErrPDFNoText        = pdfread.ErrNoTextLayer
-	ErrPDFEncrypted     = pdfread.ErrEncrypted
-	ErrPDFMalformed     = pdfread.ErrMalformed
-	ErrPDFTooLarge      = pdfread.ErrTooLarge
-	ErrPDFTooSlow       = pdfread.ErrTooSlow
-	ErrPDFUnavailable   = pdfread.ErrUnavailable
-	ErrPDFBusy          = pdfread.ErrBusy
-	ErrEncoding         = errors.New("the content encoding is not read")
-	ErrBotCheck         = errors.New("the site answered with a bot check instead of the page")
+	ErrPDFNoText      = pdfread.ErrNoTextLayer
+	ErrPDFEncrypted   = pdfread.ErrEncrypted
+	ErrPDFMalformed   = pdfread.ErrMalformed
+	ErrPDFTooLarge    = pdfread.ErrTooLarge
+	ErrPDFTooSlow     = pdfread.ErrTooSlow
+	ErrPDFUnavailable = pdfread.ErrUnavailable
+	ErrPDFBusy        = pdfread.ErrBusy
+	ErrEncoding       = errors.New("the content encoding is not read")
+	ErrBotCheck       = errors.New("the site answered with a bot check instead of the page")
+	// ErrBlockedBySite: the site refused to show the page to an automated reader, in words (blocked.go, D33), or the
+	// renderer found the same (idp-browser's blocked_by_site).
+	ErrBlockedBySite    = errors.New("the site refused to show this page to an automated reader")
 	ErrNeedsScript      = errors.New("the content of this page is produced by script and cannot be read now")
 	ErrStatus           = errors.New("the site answered with an HTTP error status")
 	ErrTooManyRedirects = errors.New("the address redirects more than 5 times")
@@ -73,6 +76,12 @@ type detail struct {
 func (d *detail) Error() string { return d.msg }
 func (d *detail) Unwrap() error { return d.kind }
 
+// StatusError is the error of an answer with an HTTP error status, for the caller that learned the status elsewhere (the
+// renderer, D33).
+func StatusError(code int) error {
+	return wrap(ErrStatus, "the site answered with HTTP status %d", code)
+}
+
 func wrap(kind error, format string, args ...any) error {
 	return &detail{kind: kind, msg: fmt.Sprintf(format, args...)}
 }
@@ -85,6 +94,8 @@ type Page struct {
 	Bytes    int    // the decoded body, before extraction
 	Type     string // the media type of the answer
 	Engine   string // what produced Text: an engine of internal/extract, or "pdf"
+	// Rendered: the text is that of a page a browser ran (idp-browser, D33), not of the HTML the site sent.
+	Rendered bool
 	// For a PDF: its pages and how many of them Text holds (the first ones; a long document is cut, ADR-0001 D31).
 	Pages, PagesRead int
 }
@@ -234,31 +245,71 @@ func (r *Reader) classify(parent, ctx context.Context, err error) error {
 type gate func(ctx context.Context, hop int, t addr.Address) error
 
 func (r *Reader) read(ctx context.Context, rawURL string) (Page, error) {
-	resp, final, err := r.follow(ctx, rawURL, func(ctx context.Context, hop int, t addr.Address) error {
-		if r.cfg.Allow != nil {
-			if err := r.cfg.Allow(t.Host); err != nil {
-				return err
-			}
-		}
-		if allow, _ := ctx.Value(allowKey{}).(func(string) error); allow != nil {
-			if err := allow(t.Host); err != nil {
-				return err
-			}
-		}
-		ok, err := r.robotsAllow(ctx, t)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return ErrRobots
-		}
-		return nil
-	})
+	resp, final, err := r.follow(ctx, rawURL, r.checkHop)
 	if err != nil {
 		return Page{}, err
 	}
 	defer resp.Body.Close()
 	return r.page(ctx, resp, final)
+}
+
+// checkHop is what every address of a chain passes before anything is sent to it: the reader's own Allow, the call's
+// (the tenant's lists), robots.txt.
+func (r *Reader) checkHop(ctx context.Context, _ int, t addr.Address) error {
+	if r.cfg.Allow != nil {
+		if err := r.cfg.Allow(t.Host); err != nil {
+			return err
+		}
+	}
+	if allow, _ := ctx.Value(allowKey{}).(func(string) error); allow != nil {
+		if err := allow(t.Host); err != nil {
+			return err
+		}
+	}
+	ok, err := r.robotsAllow(ctx, t)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrRobots
+	}
+	return nil
+}
+
+// Check applies to rawURL what a read applies to the address of a page before it sends anything there: the address
+// rules, the reader's Allow and the call's (WithAllow), and robots.txt (which is fetched through the checked path unless
+// it is cached). The renderer is told to go to an address only after this has passed for it (D33), and again for the
+// address it ended at, because the browser follows redirects the reader never saw. The context is bounded by the
+// reader's own timeout.
+func (r *Reader) Check(ctx context.Context, rawURL string) error {
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	t, err := addr.TargetWith(rawURL, r.opts)
+	if err != nil {
+		return err
+	}
+	if err := r.checkHop(ctx, 0, t); err != nil {
+		return r.classify(ctx, ctx, err)
+	}
+	return nil
+}
+
+// FromRendered turns what the renderer returned (the DOM as HTML, and where it ended) into a Page by the same path as a
+// fetched one: the same extraction, the same bot-check, refusal and needs-script judgement (D12, D27, D33). A page the
+// browser ran and that is still a frame is ErrNeedsScript again; the caller says it is the renderer's failure.
+func (r *Reader) FromRendered(finalURL, html string) (Page, error) {
+	res, err := extract.Extract([]byte(html), finalURL, extract.Options{Engine: r.cfg.Engine})
+	if err != nil {
+		r.log.Info("extraction of a rendered page failed", "err", err)
+		return Page{}, ErrUnreadable
+	}
+	if rule, err := notThePage(html, res); err != nil {
+		if rule != "" {
+			r.log.Info("the rendered page is still not the page", "rule", rule)
+		}
+		return Page{}, err
+	}
+	return Page{FinalURL: finalURL, Title: res.Title, Text: res.Markdown, Bytes: len(html), Type: "text/html", Engine: res.Engine, Rendered: true}, nil
 }
 
 func isRedirect(code int) bool {

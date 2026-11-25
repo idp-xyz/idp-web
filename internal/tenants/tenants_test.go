@@ -200,3 +200,37 @@ func TestADailyLimitThatIsNegativeTooLargeOrNotAWholeNumberIsAnErrorThatNamesIt(
 		t.Errorf("the largest limit: %v", err)
 	}
 }
+
+func TestAlwaysRenderNamesDomainsAndTheirSubdomainsAndIsValidatedLikeTheOtherLists(t *testing.T) {
+	s := parse(t, `
+default: {enabled: true, alwaysRender: [Default.example.]}
+tenants:
+  acme: {enabled: true, alwaysRender: [spa.example.com, 例え.jp]}
+  bare: {enabled: true}
+`)
+	p := s.For("acme")
+	for host, want := range map[string]bool{"spa.example.com": true, "a.b.spa.example.com": true, "example.com": false, "notspa.example.com": false, "spa.example.com.evil.test": false, "xn--r8jz45g.jp": true, "www.xn--r8jz45g.jp": true} {
+		if got := p.RendersFirst(host); got != want {
+			t.Errorf("%s: %v, want %v", host, got, want)
+		}
+	}
+	if s.For("bare").RendersFirst("spa.example.com") || s.For("stranger").RendersFirst("default.example") != true {
+		t.Error("a tenant's entry replaces the default as a whole, and the default applies to a tenant not named")
+	}
+	if got := s.AlwaysRenders(); strings.Join(got, ",") != "acme,default" {
+		t.Errorf("%v", got)
+	}
+	// it names domains to render, it allows nothing: the lists still decide
+	x := parse(t, "tenants:\n  t: {enabled: true, excludeDomains: [spa.example.com], alwaysRender: [spa.example.com]}\n")
+	if err := x.For("t").AllowHost("spa.example.com"); !errors.Is(err, ErrExcluded) {
+		t.Errorf("%v", err)
+	}
+	for _, bad := range []string{"https://spa.example.com", "spa.example.com/news", "*.example.com", "spa.example.com:8080", ""} {
+		if _, err := Parse([]byte("tenants:\n  t: {enabled: true, alwaysRender: [\"" + bad + "\"]}\n")); err == nil || !strings.Contains(err.Error(), "alwaysRender") {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	if _, err := Parse([]byte("tenants:\n  t: {enabled: true, alwaysRenders: [a.test]}\n")); err == nil {
+		t.Error("a misspelt key was accepted")
+	}
+}

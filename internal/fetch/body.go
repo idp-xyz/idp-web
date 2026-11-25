@@ -76,6 +76,11 @@ func (r *Reader) page(ctx context.Context, resp *http.Response, final addr.Addre
 		}
 		return Page{}, wrap(ErrType, "content type %s is not read", kind)
 	}
+	if kind == "text/html" || kind == "application/xhtml+xml" {
+		if fn, _ := ctx.Value(htmlKey{}).(func()); fn != nil {
+			fn()
+		}
+	}
 	text := decodeText(body, resp.Header.Get("Content-Type"))
 	if kind == "text/plain" {
 		return Page{FinalURL: finalURL, Text: strings.TrimSpace(text), Bytes: len(body), Type: kind, Engine: extract.Plain}, nil
@@ -87,7 +92,7 @@ func (r *Reader) page(ctx context.Context, resp *http.Response, final addr.Addre
 	}
 	if rule, err := notThePage(text, res); err != nil {
 		if rule != "" {
-			r.log.Info("the page needs script", "rule", rule) // which sign found it, for whoever reads the log (D27)
+			r.log.Info("the page is not the page", "rule", rule) // which sign found it, for whoever reads the log (D27, D33)
 		}
 		return Page{}, err
 	}
@@ -100,10 +105,13 @@ func (r *Reader) page(ctx context.Context, resp *http.Response, final addr.Addre
 // remedy is a different source for a reason that may pass, where a page that needs script will not pass by itself.
 // Both are asked of res, the text after the fallback of D5, so a page the plain reader rescued is judged by what the
 // model would get.
-// The first result is the name of the rule that found a page that needs script, "" otherwise.
+// The first result is the name of the rule that found a page that needs script, or the marker of a refusal, "" otherwise.
 func notThePage(rawHTML string, res extract.Result) (rule string, err error) {
 	if isBotCheck(rawHTML, res.Title, res.Markdown) {
 		return "", ErrBotCheck
+	}
+	if sig := refusalSignal(res.Markdown); sig != "" {
+		return "refusal: " + sig, ErrBlockedBySite
 	}
 	if rule := needsScript(rawHTML, res.Markdown); rule != "" {
 		return rule, ErrNeedsScript
@@ -140,6 +148,8 @@ func (r *Reader) errorAnswer(resp *http.Response, kind string) error {
 				text := decodeText(body, resp.Header.Get("Content-Type"))
 				if res, err := extract.Extract([]byte(text), "", extract.Options{Engine: extract.Plain}); err == nil && isBotCheck(text, res.Title, res.Markdown) {
 					return ErrBotCheck
+				} else if err == nil && refusalSignal(res.Markdown) != "" {
+					return ErrBlockedBySite
 				}
 			}
 		}
