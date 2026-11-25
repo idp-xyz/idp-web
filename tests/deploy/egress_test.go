@@ -50,14 +50,15 @@ func TestEgressPolicyIsTheOnlyWayOutAndIsIPv4Only(t *testing.T) {
 			}
 		}
 	}
-	// allow-dns (kube-dns, port 53), web-egress (the public internet) and web-database (PostgreSQL, tested by
-	// TestTheDatabaseIsTheOnlyPlaceInTheClusterTheServiceAndTheJobMayReach): nothing else
+	// allow-dns (kube-dns, port 53), web-egress (the public internet), web-database (PostgreSQL, tested by
+	// TestTheDatabaseIsTheOnlyPlaceInTheClusterTheServiceAndTheJobMayReach) and web-renderer (idp-browser's render port, tested by
+	// TestTheServiceMayReachTheRenderersPortOnly): nothing else
 	names := map[string]bool{}
 	for _, p := range egress {
 		names[str(p, "metadata", "name")] = true
 	}
-	if len(egress) != 3 || !names["allow-dns"] || !names["web-egress"] || !names["web-database"] {
-		t.Fatalf("policies that allow egress: %v, want allow-dns, web-egress and web-database", names)
+	if len(egress) != 4 || !names["allow-dns"] || !names["web-egress"] || !names["web-database"] || !names["web-renderer"] {
+		t.Fatalf("policies that allow egress: %v, want allow-dns, web-egress, web-database and web-renderer", names)
 	}
 	var web doc
 	for _, p := range egress {

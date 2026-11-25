@@ -137,3 +137,26 @@ spec:
               app.kubernetes.io/name: postgresql
       ports:
         - {protocol: TCP, port: 5432}
+---
+# Out, to the renderer (idp-browser, ADR-0001 D33): the pods of its Deployment in the idp-browser namespace, on the render port 8590, and nothing else. Used only when
+# IDP_WEB_RENDER_URL is set (web.yaml); the renderer's own namespace admits idp-web the same way (its renderer-ingress). Without a renderer nothing answers there.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-renderer
+  namespace: idp-web
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: web
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: idp-browser
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: renderer
+      ports:
+        - {protocol: TCP, port: 8590}

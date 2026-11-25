@@ -412,3 +412,32 @@ func TestTheDatabaseIsTheOnlyPlaceInTheClusterTheServiceAndTheJobMayReach(t *tes
 		t.Errorf("port %v", port)
 	}
 }
+
+// the renderer (idp-browser): idp-web may reach its pods on the render port and nothing of that namespace else
+func TestTheServiceMayReachTheRenderersPortOnly(t *testing.T) {
+	var p doc
+	for _, np := range loadAll(t).byKind["NetworkPolicy"] {
+		if str(np, "metadata", "name") == "web-renderer" {
+			p = np
+		}
+	}
+	if p == nil {
+		t.Fatal("no web-renderer policy")
+	}
+	if got := strs(list(p, "spec", "policyTypes")); len(got) != 1 || got[0] != "Egress" || str(p, "spec", "podSelector", "matchLabels", "app.kubernetes.io/component") != "web" {
+		t.Errorf("policy %v", p["spec"])
+	}
+	eg := list(p, "spec", "egress")
+	if len(eg) != 1 || len(list(eg[0], "to")) != 1 || len(list(eg[0], "ports")) != 1 {
+		t.Fatalf("egress %v", eg)
+	}
+	to := list(eg[0], "to")[0]
+	ns, _ := get(to, "namespaceSelector", "matchLabels").(doc)
+	pods, _ := get(to, "podSelector", "matchLabels").(doc)
+	if get(to, "ipBlock") != nil || ns["kubernetes.io/metadata.name"] != "idp-browser" || pods["app.kubernetes.io/component"] != "renderer" {
+		t.Errorf("peer %v", to)
+	}
+	if port := list(eg[0], "ports")[0]; get(port, "port") != 8590 || str(port, "protocol") != "TCP" {
+		t.Errorf("port %v", port)
+	}
+}

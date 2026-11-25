@@ -81,6 +81,13 @@ spec:
             #   value: https://api.eu.exa.ai
             # - name: IDP_WEB_BRAVE_KEY_FILE       # brave; the Secret holds it as brave.key
             #   value: /etc/idp/search/brave.key
+            # THE RENDERER (idp-browser, ADR-0001 D33) is optional: a page whose text is made by script is then read once through it. Add both (a patch, or an edit);
+            # the Secret holds idp-web's P-256 private key as render.key and the renderer has the public half; the audience of the signature is this URL, character for
+            # character, which is what the renderer is configured to expect (its IDP_BROWSER_CALLER_AUDIENCE). The egress rule web-renderer (networkpolicy.yaml) is there already.
+            # - name: IDP_WEB_RENDER_URL
+            #   value: http://idp-browser.idp-browser.svc.cluster.local:8590/render
+            # - name: IDP_WEB_RENDER_KEY_FILE
+            #   value: /etc/idp/render/render.key
             # `fixture` (answers from a file, no network) is for development and acceptance and is never a production setting.
             # Never IDP_WEB_TEST_ORIGINS: it exempts addresses from the address rules (ADR-0001 D14), and tests/deploy fails
             # if it is in these files.
