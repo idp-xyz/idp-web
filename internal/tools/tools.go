@@ -185,6 +185,53 @@ func obj(props map[string]any, required ...string) map[string]any {
 	return map[string]any{"type": "object", "properties": props, "required": required, "additionalProperties": false}
 }
 
+// searchOutputSchema and readOutputSchema declare the structuredContent of the tools (ADR-0001 D34). They say what the
+// text content says, as fields, so that a client never parses the text. The text is plain ASCII on purpose.
+func searchOutputSchema() map[string]any {
+	str := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
+	item := obj(map[string]any{
+		"n":         map[string]any{"type": "integer", "minimum": 1, "description": "The number of the source for this caller; the same address always has the same number."},
+		"title":     str("The title of the result (the address when it has none)."),
+		"url":       map[string]any{"type": "string", "minLength": 1, "description": "The address, as web_fetch takes it."},
+		"ref":       map[string]any{"type": "string", "minLength": 1, "maxLength": maxRef, "description": "The ref that web_fetch needs with this address, exactly as listed."},
+		"published": map[string]any{"type": "string", "description": "The day of publication (YYYY-MM-DD as the provider gives it), when it says; absent otherwise."},
+		"excerpt":   str("The provider's excerpt of the page, as the text content shows it; untrusted web text; absent when there is none."),
+	}, "n", "title", "url", "ref")
+	return obj(map[string]any{"citations": map[string]any{"type": "array", "items": item,
+		"description": "The results in the order listed; an empty list when there are none."}}, "citations")
+}
+
+func readOutputSchema() map[string]any {
+	integer := func(desc string) map[string]any {
+		return map[string]any{"type": "integer", "minimum": 0, "description": desc}
+	}
+	item := obj(map[string]any{
+		"n":          map[string]any{"type": "integer", "minimum": 1, "description": "The number of the source for this caller; the same as in the search result of the address."},
+		"title":      map[string]any{"type": "string", "description": "The title of the page (the address when it has none)."},
+		"url":        map[string]any{"type": "string", "minLength": 1, "description": "The address that was asked for."},
+		"finalUrl":   map[string]any{"type": "string", "description": "Where the read ended when a redirect took it elsewhere; absent otherwise."},
+		"fetchedAt":  map[string]any{"type": "string", "description": "When the page was read (RFC 3339, UTC)."},
+		"rendered":   map[string]any{"type": "boolean", "description": "True when the text is that of the page after a browser ran its script; absent otherwise."},
+		"sha256":     map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The SHA-256 of text, in hexadecimal."},
+		"ref":        map[string]any{"type": "string", "minLength": 1, "maxLength": maxRef, "description": "The ref given to web_fetch for this address; absent for web_open_url."},
+		"text":       map[string]any{"type": "string", "description": "This part of the page text, exactly as the text content carries it after its first line; untrusted web text; empty when notice is set."},
+		"start":      integer("The byte offset of text in the page text."),
+		"end":        integer("The byte offset where text ends."),
+		"total":      integer("The length of the page text in bytes."),
+		"nextOffset": integer("The offset to pass for the rest of the page; absent when text reaches the end."),
+		"truncated":  map[string]any{"type": "boolean", "description": "True when there is a rest of the page after text (nextOffset is set)."},
+		"notice": map[string]any{"type": "string", "enum": []string{"no_text", "offset_past_end"},
+			"description": "Why text is empty: no_text, the page has no text; offset_past_end, the offset is at or past the end of the page text. Absent when text is not empty."},
+		"pdf": obj(map[string]any{
+			"pages":     integer("The pages of the document."),
+			"pagesRead": integer("How many of them the text holds (the first ones)."),
+			"cut":       map[string]any{"type": "boolean", "description": "True when only the first pagesRead pages are read."},
+		}, "pages", "pagesRead", "cut"),
+	}, "n", "title", "url", "fetchedAt", "sha256", "text", "start", "end", "total", "truncated")
+	item["properties"].(map[string]any)["pdf"].(map[string]any)["description"] = "Present for a PDF only."
+	return obj(map[string]any{"citations": map[string]any{"type": "array", "items": item, "description": "One entry: the source and the part of it that was read."}}, "citations")
+}
+
 // short is the caller as the audit line names it: a hash prefix, never the subject (ADR-0001 D4).
 func short(id string) string {
 	if id == "" {
@@ -307,8 +354,9 @@ func New(cfg Config) []mcp.Tool {
 				"freshness": map[string]any{"type": "string", "enum": freshnessValues, "description": "Only results published within the last day, week, month or year."},
 				"count":     map[string]any{"type": "integer", "minimum": 1, "maximum": maxCount, "description": "How many results to return (default 5)."},
 			}, "query"),
-			Annotations: readOnlyOpenWorld(),
-			Call:        a.wrap("web_search", a.search)},
+			OutputSchema: searchOutputSchema(),
+			Annotations:  readOnlyOpenWorld(),
+			Call:         a.wrap("web_search", a.search)},
 		{Name: "web_fetch",
 			Description: "Read a page that web_search returned. Give the address and the ref listed next to it; an address without its matching ref is refused. Returns the page text as Markdown in pieces: pass offset to continue.",
 			InputSchema: obj(map[string]any{
@@ -316,16 +364,18 @@ func New(cfg Config) []mcp.Tool {
 				"ref":    map[string]any{"type": "string", "minLength": 1, "maxLength": maxRef, "description": "The ref listed with that address, exactly as listed."},
 				"offset": map[string]any{"type": "integer", "minimum": 0, "description": "Where to continue in the page text (default 0)."},
 			}, "url", "ref"),
-			Annotations: readOnlyOpenWorld(),
-			Call:        a.wrap("web_fetch", a.fetch)},
+			OutputSchema: readOutputSchema(),
+			Annotations:  readOnlyOpenWorld(),
+			Call:         a.wrap("web_fetch", a.fetch)},
 		{Name: "web_open_url",
 			Description: "Read a page at an address the member gave. Unlike web_fetch this needs no ref, so the member is asked to confirm the address first. Returns the page text as Markdown in pieces: pass offset to continue.",
 			InputSchema: obj(map[string]any{
 				"url":    map[string]any{"type": "string", "minLength": 1, "maxLength": maxURL, "description": "The address the member gave."},
 				"offset": map[string]any{"type": "integer", "minimum": 0, "description": "Where to continue in the page text (default 0)."},
 			}, "url"),
-			Annotations: readOnlyOpenWorld(),
-			Call:        a.wrap("web_open_url", a.open)},
+			OutputSchema: readOutputSchema(),
+			Annotations:  readOnlyOpenWorld(),
+			Call:         a.wrap("web_open_url", a.open)},
 	}
 }
 

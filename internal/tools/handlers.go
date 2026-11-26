@@ -27,7 +27,22 @@ func (a *api) policy(c mcp.Caller) tenants.Policy {
 	return a.cfg.Tenants.For(c.Tenant)
 }
 
-// citation is the structured record of a source the model was given (platform ADR-0003 D9).
+// sourceCitation is a source of a search, in the structured result of web_search (ADR-0001 D34): everything the text
+// shows for it, as fields.
+type sourceCitation struct {
+	N     int    `json:"n"`
+	Title string `json:"title"`
+	URL   string `json:"url"`
+	// Ref is what web_fetch needs with URL, exactly as the text lists it.
+	Ref string `json:"ref"`
+	// Published is the day (YYYY-MM-DD) when the provider says; absent otherwise. Excerpt is the provider's, as the text
+	// shows it (untrusted web text, not changed here); absent when there is none.
+	Published string `json:"published,omitempty"`
+	Excerpt   string `json:"excerpt,omitempty"`
+}
+
+// citation is the structured record of a source the model was given and, for a read, of the part of it that was read
+// (platform ADR-0003 D9, ADR-0001 D34): the text content's header and body as fields.
 type citation struct {
 	N     int    `json:"n"`
 	Title string `json:"title"`
@@ -40,6 +55,27 @@ type citation struct {
 	// Rendered: the text is that of the page after a browser ran its script (ADR-0001 D33), not of the HTML the site sent.
 	Rendered bool   `json:"rendered,omitempty"`
 	SHA256   string `json:"sha256,omitempty"`
+	// Ref is the ref the caller gave web_fetch for this address; absent for web_open_url, which takes none.
+	Ref string `json:"ref,omitempty"`
+	// Text is the part of the page text that the text content carries after its header, exactly (empty when there is
+	// none; Notice says why). Start and End are its byte offsets in the page text of Total bytes; NextOffset is where
+	// the rest starts (absent at the end), and Truncated says there is a rest.
+	Text       string `json:"text"`
+	Start      int    `json:"start"`
+	End        int    `json:"end"`
+	Total      int    `json:"total"`
+	NextOffset *int   `json:"nextOffset,omitempty"`
+	Truncated  bool   `json:"truncated"`
+	// Notice stands for the sentence the text content puts in place of an empty part: "no_text" or "offset_past_end".
+	Notice string `json:"notice,omitempty"`
+	// PDF is set for a PDF: its pages, how many of them the text holds, and whether the document was cut.
+	PDF *pdfInfo `json:"pdf,omitempty"`
+}
+
+type pdfInfo struct {
+	Pages     int  `json:"pages"`
+	PagesRead int  `json:"pagesRead"`
+	Cut       bool `json:"cut"`
 }
 
 // search is web_search: the results of the provider that the tenant's rules allow, each with its number and its ref.
@@ -124,11 +160,12 @@ func (a *api) search(ctx context.Context, caller mcp.Caller, args map[string]jso
 		return a.fail(tool, au, ErrNumberingUnavailable)
 	}
 	var blocks []string
-	cites := []citation{}
+	cites := []sourceCitation{}
 	for i, k := range keep {
 		r := keepResults[i]
 		n := nums[i]
-		b := fmt.Sprintf("[%d] %s\naddress: %s\nref: %s", n, k.title, k.url, a.cfg.Keys.Make(caller.Owner(), k.url))
+		ref := a.cfg.Keys.Make(caller.Owner(), k.url)
+		b := fmt.Sprintf("[%d] %s\naddress: %s\nref: %s", n, k.title, k.url, ref)
 		if r.Published != "" {
 			b += "\npublished: " + r.Published
 		}
@@ -136,7 +173,7 @@ func (a *api) search(ctx context.Context, caller mcp.Caller, args map[string]jso
 			b += "\nexcerpt: " + r.Snippet
 		}
 		blocks = append(blocks, b)
-		cites = append(cites, citation{N: n, Title: k.title, URL: k.url})
+		cites = append(cites, sourceCitation{N: n, Title: k.title, URL: k.url, Ref: ref, Published: r.Published, Excerpt: r.Snippet})
 	}
 	au.results = len(cites)
 	text := "no results"
@@ -175,7 +212,7 @@ func (a *api) fetch(ctx context.Context, caller mcp.Caller, args map[string]json
 	if err := a.cfg.Keys.Check(caller.Owner(), in.URL, in.Ref); err != nil {
 		return a.fail(tool, au, err)
 	}
-	return a.read(ctx, tool, caller, pol, au, in.URL, in.Offset)
+	return a.read(ctx, tool, caller, pol, au, in.URL, strings.TrimSpace(in.Ref), in.Offset)
 }
 
 // open is web_open_url: the page at an address the member gave, for a tenant that allows it. The HOST asks the member
@@ -200,13 +237,13 @@ func (a *api) open(ctx context.Context, caller mcp.Caller, args map[string]json.
 	if !pol.OpenURL {
 		return a.fail(tool, au, tenants.ErrOpenDisabled)
 	}
-	return a.read(ctx, tool, caller, pol, au, in.URL, in.Offset)
+	return a.read(ctx, tool, caller, pol, au, in.URL, "", in.Offset)
 }
 
 // read is what web_fetch and web_open_url share once the address is allowed to be asked for: the address rules and the
 // tenant's domain lists on the first address, the cache, the rate limit, the reader (which applies the lists again on
 // every redirect through the call's Allow rule), and the part at offset.
-func (a *api) read(ctx context.Context, tool string, caller mcp.Caller, pol tenants.Policy, au *audit, rawURL string, offset int) mcp.Result {
+func (a *api) read(ctx context.Context, tool string, caller mcp.Caller, pol tenants.Policy, au *audit, rawURL, ref string, offset int) mcp.Result {
 	if a.cfg.Reader == nil {
 		return a.fail(tool, au, ErrNotAvailable)
 	}
@@ -295,14 +332,23 @@ func (a *api) read(ctx context.Context, tool string, caller mcp.Caller, pol tena
 	} else {
 		head += ")"
 	}
-	body := part
+	body, notice := part, ""
 	if body == "" {
-		body = "(no text found on this page)"
+		body, notice = "(no text found on this page)", "no_text"
 		if offset >= total && total > 0 {
-			body = "(nothing at this offset: the page text is shorter)"
+			body, notice = "(nothing at this offset: the page text is shorter)", "offset_past_end"
 		}
+	}
+	var pdf *pdfInfo
+	if c.page.Type == "application/pdf" {
+		pdf = &pdfInfo{Pages: c.page.Pages, PagesRead: c.page.PagesRead, Cut: c.page.PagesRead < c.page.Pages}
+	}
+	var nextOffset *int
+	if next >= 0 {
+		nextOffset = &next
 	}
 	sum := sha256.Sum256([]byte(part))
 	return mcp.Result{Text: head + "\n\n" + body, Structured: map[string]any{"citations": []citation{{
-		N: n, Title: title, URL: u, FinalURL: final, FetchedAt: c.fetchedAt.Format(time.RFC3339), Rendered: c.page.Rendered, SHA256: hex.EncodeToString(sum[:])}}}}
+		N: n, Title: title, URL: u, FinalURL: final, FetchedAt: c.fetchedAt.Format(time.RFC3339), Rendered: c.page.Rendered, SHA256: hex.EncodeToString(sum[:]),
+		Ref: ref, Text: part, Start: start, End: start + len(part), Total: total, NextOffset: nextOffset, Truncated: next >= 0, Notice: notice, PDF: pdf}}}}
 }

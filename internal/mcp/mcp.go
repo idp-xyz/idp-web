@@ -52,8 +52,11 @@ type Tool struct {
 	Name        string
 	Description string
 	InputSchema map[string]any
-	Annotations map[string]any
-	Call        func(r *http.Request, args map[string]json.RawMessage) Result
+	// OutputSchema is the JSON Schema of the structuredContent of a successful result (MCP 2025-06-18 and later; the root
+	// is an object). Nil declares none.
+	OutputSchema map[string]any
+	Annotations  map[string]any
+	Call         func(r *http.Request, args map[string]json.RawMessage) Result
 }
 
 // Result is a tool result: text for the model, structured data for programs.
@@ -239,6 +242,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		tools := make([]map[string]any, 0, len(s.Tools))
 		for _, t := range s.Tools {
 			m := map[string]any{"name": t.Name, "description": t.Description, "inputSchema": t.InputSchema}
+			if t.OutputSchema != nil {
+				m["outputSchema"] = t.OutputSchema
+			}
 			if t.Annotations != nil {
 				m["annotations"] = t.Annotations
 			}

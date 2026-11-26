@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 状态 | 已接受（2026-11-19，随任务 W1；平台 ADR-0003 附录 C 的阶段 1 计划）；D16 到 D25 随任务 W4；D26 随任务 P2（Kubernetes 部署）；D27 随平台 ADR-0003 附录 D 第二阶段的任务 W4（需要脚本的页面）；D28 到 D30 随同一阶段的任务 W6（每日配额、PostgreSQL、来源编号入库）；D31 随同一阶段的任务 W5（PDF）；D33 随浏览器能力计划的任务 L1-3（渲染后读取） |
+| 状态 | 已接受（2026-11-19，随任务 W1；平台 ADR-0003 附录 C 的阶段 1 计划）；D16 到 D25 随任务 W4；D26 随任务 P2（Kubernetes 部署）；D27 随平台 ADR-0003 附录 D 第二阶段的任务 W4（需要脚本的页面）；D28 到 D30 随同一阶段的任务 W6（每日配额、PostgreSQL、来源编号入库）；D31 随同一阶段的任务 W5（PDF）；D33 随浏览器能力计划的任务 L1-3（渲染后读取）；D34 随 HOST 的引用编号（idp-host ADR §49，结构化结果的契约，决策人委托维护方决定） |
 | 范围 | `idp-web` 的技术栈、调用者校验、工具声明、正文提取的接口与规则、地址规则与读取（D6 到 D15，任务 W3）。`ref`、搜索适配器、租户配置、编号、缓存、限流、审计、错误句子（D16 到 D25，任务 W4）；每日配额、数据库与跨副本的编号（D28 到 D30，任务 W6）；PDF 的读取、解析库的选择与子进程的隔离（D31，任务 W5） |
 | 依据 | 平台 ADR-0003（网页搜索与读取）D1、D2；idp-sandbox ADR-0001 D10、D18；idp-mcp ADR-0001 D40、D44；平台 ADR-0003 D4、7.3（T3、T7）、13.1；idp-sandbox ADR-0001 D22；RFC 9309；MCP 2026-07-28 |
 
@@ -49,6 +49,7 @@
 | D31 | **PDF：有文字层的 PDF 读成带 `[page N]` 标记的文本；解析库是 `github.com/go-pdfkit/extract` v0.11.0（BSD-3-Clause），按事先写定的规则从 7 个纯 Go 的候选里选出；解析在子进程 `idp-web-pdf` 里做，自己给自己加时间、内存、系统调用的限制；工具链随之升到 Go 1.27（`go 1.27.1`，`toolchain go1.27.4`）** | 见第 10 节。范围（平台 ADR-0003 附录 D 4.3）：有文字层的 PDF，不做 OCR；扫描件、加密的、损坏的各有自己的错误（`pdf_no_text_layer`、`pdf_encrypted`、`pdf_malformed`），另有 `pdf_too_large`（压缩炸弹或内存上限）、`pdf_too_slow`、`pdf_busy`、`pdf_reader_unavailable`；下载沿用 5 MiB 与 15 秒；最多读 200 页，更长的读前 200 页并在文本开头和首行写明；输出照旧 12 KiB 一段，引用的 `sha256` 仍是交给模型那一段的摘要。**判断是不是 PDF 看字节，不只看标签**：正文以 `%PDF-` 开头就是 PDF（服务器会把它标成 octet-stream、text/plain、text/html 或不标）；标成 `application/pdf` 而内容是 HTML 页面的，按 HTML 读；标成 PDF 而什么也不是的，`pdf_malformed`。其他类型照旧不读、不下载正文。D10 与 D15 里"PDF 暂不支持"（`ErrPDF`）随之取消。测试：`internal/pdfreader`（解析、规则、对抗文件、子进程限制）、`internal/pdfread`（Runner：期限、杀进程组、输出上限、并发、取消、缺程序）、`internal/fetch/pdf_test.go`（类型判断）、`internal/tools/pdf_test.go`（首行、分段、引用、每个错误的句子与原因）、`cmd/idp-web/pdf_test.go`（启动自检、关闭） **补记（跟进）：**文件大小限制为 0 是有意的，所以输出到文件（`> out.txt`）本来只会无声地以 1 结束；现在在施加限制之前检查标准输出与标准错误是不是普通文件，是就以原因词 `unavailable`（不是关于文档的原因，评测的打分程序不认识它）、一句说明要接管道的话和退出码 2 结束；检查之后的写入遇到 EFBIG 同样如此，SIGXFSZ 被忽略（`TestOutputToAFileIsRefusedWithAMessageThatSaysToPipeIt`、`TestAWriteToAFileThatMeetsTheLimitIsReportedAsTheReaderNotTheDocument`、`TestOutputToAPipeIsReadAsBefore`）。 |
 | D32 | **已检查的地址按 Happy Eyeballs（RFC 8305 第 4、5 节）拨号：交错地址族，250 ms 错开，先连上的赢，其余取消、晚到的关闭** | 原来按解析器的顺序一个接一个地拨，第一个地址是不通的 IPv6 时，整个预算（或每个死地址的超时）花在它身上；真实的例子是 www.fedex.com 在没有 IPv6 路由的网络上。检查、不重新解析、代理都没有变。默认 IPv4 先拨，可用 `IDP_WEB_DIAL_FAMILY` 改；细节与反向验证见本文件末尾的“D32”一节。 |
 | D33 | **需要脚本的页面交给渲染器（idp-browser）读一次；租户可列出"总是渲染"的域名；纯文字的拒绝页（S4）在普通读取时就报 `blocked_by_site`** | 计划 `docs/adr/browser-capability-plan.md` 第 3 节与第 8 节选择点 7。**设置**：`IDP_WEB_RENDER_URL`（渲染接口，也是签名的受众，逐字相同；不设：功能关闭，行为与以前完全一样）、`IDP_WEB_RENDER_KEY_FILE`（idp-web 的 P-256 私钥，PEM；设了 URL 而没有可用的密钥是启动错误）、`IDP_WEB_RENDER_TIMEOUT_MS`（缺省 15000）、`IDP_WEB_RENDER_MAX_BYTES`（缺省 5 MiB，渲染器的上限 20 MiB）；启动写一行日志；启动时不调用渲染器（它没起来不是不启动的理由）。租户文件新增 `alwaysRender: [域名]`（与其他名单同样的写法和校验，精确主机或后缀匹配；租户条目整体替换 default；不放行任何名单之外的东西）。**何时渲染**：先照常用普通读取器读（它做全部检查：地址规则、租户名单、robots.txt、配额、缓存，也自己读 PDF 与其他文件）；**只有最终答案是 HTML（`text/html` 或 `application/xhtml+xml`、状态 2xx）时**才可能渲染，PDF、纯文字、其他类型、错误状态页从不交给渲染器（浏览器遇到要下载的文件会报 `render_failed`），实现是读取器的 `fetch.WithHTML` 回调；HTML 且（普通读取判为 `needs_script`（D27），或主机在租户的 `alwaysRender` 里）时渲染**一次**：`POST` 签名请求，取回的 `html` 与 `finalUrl` 走与抓取的页面同一条提取路径（`Reader.FromRendered`：同样的分段、12 KiB、引用的 `finalUrl` 与 SHA-256、同样的 D12、D27、D33 判断）。**渲染后的地址再检查**：浏览器自己跟随重定向，所以 `finalUrl` 要再过地址规则、租户名单与 robots.txt（`Reader.Check`），不过就拒绝，不缓存、不读。**标记**：首行 `(rendered; bytes …)`，引用里 `"rendered": true`，缓存条目带标记（缓存键规则不变：租户加请求的地址）。**列出的主机**渲染失败时，普通读取到的页面照常交给模型（未标记渲染）；非列出的主机渲染失败则是 `needs_script` 的句子，原因记渲染器的码。**签名**：调用者断言（idp-browser ADR-0001 D8）：ES256，`typ idp-caller+jwt`，`kid` 为公钥的 RFC 7638 指纹，`aud` 为配置的 URL，`sub` 为 `idp-web`，有效 30 秒，`jti` 随机，`req` 为 `sha256(METHOD "\n" PATH "\n" body)`，`Authorization: Bearer`。**客户端**：不走代理、不跟随重定向、响应有上限、时限为渲染器的时限加 5 秒（只切断一个根本不答复的渲染器，报 `render_timeout`）。**配额**：一次调用最多渲染一次，渲染与前面的普通读取合起来是一次读取（一份窗口额度、一份每日额度，由 `read` 里取到的那一份承担），没有"渲染的第二份"。**S4**：普通读取时，HTTP 200（或 403、429、503）的页面，可见文字不超过 1000 字且含拒绝的话（FedEx/Akamai "It appears you don't have permission to view this webpage"、Akamai "Reference #…"、Incapsula 等），答 `blocked_by_site`，不再当作成功读取（在 www.fedex.com 上发现）；**从 idp-browser 的 `detect.go` 复制的只有 S4**（`refusalMarkers`、`akamaiRef`、1000 字的界），原因：它只需要可见文字、没有浏览器也可靠；S1 到 S3（挑战页的标记）D12 已覆盖，其余的（HUMAN、DataDome、Imperva、阿里云、GeeTest 的 HTML 标记）没有复制：没有浏览器时那样的页面只是一段脚本和一个空框，D12 与 D27 已拦住，渲染器才分得清；S5（光秃秃的 403 或 429）本来就是 `http_status`。 | 结果与原因（审计 `reason`；模型读到的句子）见本文件末尾"D33"一节的表。渲染器宕机不影响任何其他读取。 |
+| D34 | **工具的结构化结果是声明了的、完整的契约：三个工具都声明 `outputSchema`，每个成功的结果都符合它，结构里的字段与文字内容所示的信息一一对应，文字内容一字不改**（**决策人委托维护方决定**） | 背景：HOST 成为一次运行里唯一给引用编号的一方（idp-host ADR §49 D70–D76），原来 `structuredContent.citations` 只有 `n`、`title`、`url`、`finalUrl`、`fetchedAt`、`rendered`、`sha256`；摘录、`web_fetch` 要的 `ref`、发布日期和正文只在文字里，HOST 只能解析 idp-web 的文字排版来重新编号，耦合脆弱。做法见下面「D34 的细节」：协议 2026-07-28（`outputSchema` 自 2025-06-18 起有，根必须是对象）；只加字段，已有字段与含义不变；不在 idp-web 里清洗摘录（那是网页的不可信文字，由 HOST 处理）。 |
 
 ## 3. D5 的细节（任务 W2）
 
@@ -470,3 +471,43 @@ D13 的根证书本身不是单元测试能证明的：见任务报告里在镜�
 | URL 没有密钥也能启动 | `TestAURLWithoutAUsableKeyOr…` |
 
 **已知差距。**（1）`alwaysRender` 的 HTML 页抓两次。（2）渲染的是匿名、无 Cookie 的页面，需要登录的页面不在范围内（计划第 3 节）。（3）没有给渲染器的 NetworkPolicy 出口、Secret 与环境变量：属于平台验收（L1-4）。
+
+## 反向验证与细节（D34，结构化结果的契约，决策人委托维护方决定）
+
+**协议。**本服务与网关说的都是 MCP 2026-07-28（`mcp.ProtocolVersion`）。`outputSchema` 与 `structuredContent` 自 2025-06-18 起就在协议里：`outputSchema` 是 JSON Schema（缺省 2020-12），根必须是 `type: object`；声明了的工具，`structuredContent` 应当符合它；规范还要求返回结构化内容的工具同时给出文字，所以文字内容不变，给老客户端用。`tools/list` 现在带 `outputSchema`（`internal/mcp`），网关会把它与 `inputSchema`、标注一起钉住：以后任何改动都要重新评审。
+
+**网关怎么传（只读 idp-mcp 得出，未改它）。**`internal/server/results.go` 的 `Tool` 有 `OutputSchema` 字段并在 `tools/list` 里原样写出（未知字段也原样保留）；`internal/registry/catalog.go` 钉住时一并看它；`tools/call` 的应答由网关原样转发（`internal/gateway`：内部目标不改写结果；只有 class external 的目标会被删去 `io.idp.telos/` 开头的键，`stripOurKeys`，本服务的字段没有这个前缀）。`outputSchema` 不被网关用来校验上游的返回（idp-mcp ADR-0001 的局限：「`outputSchema` 不校验上游的返回」），所以校验由本服务的测试负责。没有发现丢弃或拒绝。class external 才有的说明文字检查（长度、不可见字符）也被遵守：`outputSchema` 全是 ASCII。
+
+**`web_search` 的 `structuredContent`。**`{citations: [...]}`，列表一定在（没有结果时是 `[]`，文字是 `no results`）。每项：`n`、`title`、`url`（已有）；新增 `ref`（与文字里的 `ref:` 相同，`web_fetch` 要的就是它）、`published`（服务商给了才有，否则没有这个字段）、`excerpt`（与文字里的 `excerpt:` 同一段，没有则没有字段；不可信的网页文字，未改）。
+
+**`web_fetch` 与 `web_open_url` 的 `structuredContent`（同一个 schema）。**`{citations: [一项]}`。已有字段不变：`n`、`title`、`url`、`finalUrl`、`fetchedAt`、`rendered`、`sha256`。新增：`text`（文字内容里首行之后的那一段，原样；`sha256` 就是它的哈希）、`start`、`end`、`total`（字节位置，对应首行的 `bytes a–b of c`）、`nextOffset`（对应 `the rest: … with offset N`，读到末尾则没有）、`truncated`（有后文即 true）、`notice`（`no_text` 或 `offset_past_end`，代替文字里的两句括号说明，此时 `text` 为空）、`pdf`（`{pages, pagesRead, cut}`，仅 PDF）、`ref`（仅 `web_fetch`：调用者给的那个；`web_open_url` 没有）。**`published` 在读取里不出现：**读取不知道页面的发布日期（服务商的搜索结果才有），所以不声明也不返回；要日期的调用方用搜索结果里同一个 `n` 的那一项。
+
+**文字与结构的对应。**测试里用结构单独拼出文字内容，要与实际文字逐字相同（每个字段都被这条检查覆盖）；`text` 的哈希、`end - start` 与 `text` 的长度、`truncated` 与 `nextOffset` 同在也被检查。
+
+**已知差距。**（1）`structuredContent.text` 与文字内容里的正文是同一段，一个结果因此比原来大一倍（一段 12 KiB）；HOST 交给模型的上限由 HOST 决定（idp-mcp 指南的未决项 10）。（2）`published` 的格式取决于服务商（`date()` 只保证前 10 个字符的形状），schema 因此只说是字符串。（3）搜索结果的 `url` 没有长度上限，因为服务商给的地址可能比 `web_fetch` 收的更长，而 schema 必须永远成立。
+
+**反向验证（2026-11-26）。**每项去掉后，下列测试失败，恢复后全过（`make test`；脚本逐项做）。测试在 `internal/tools/contract_test.go`；缩写：`Contract` 指其中所有对结果做 schema 校验与文字对应检查的测试。
+
+| 去掉 | 失败的测试 |
+|---|---|
+| `web_search` 不声明 `outputSchema` | `TestEveryToolDeclaresAnObjectOutputSchema…` 与所有 `Contract` 测试 |
+| `tools/list` 不带 `outputSchema` | `TestToolsListCarriesTheOutputSchema…` |
+| 搜索项没有 `ref` | `TestASearchResultIsCompleteInItsStructure…`、`TestTheNumberAndTheRefOfASearch…` 等 |
+| 搜索项没有 `excerpt` | 同上、`TestAnExcerptThatImitatesTheListing…` |
+| 搜索项没有 `published` | 同上 |
+| 摘录被改动（换行换成空格） | `TestAnExcerptThatImitatesTheListingStaysOneString…` |
+| 读取没有 `text` | `TestAFetchIsComplete…`、`TestAFetchedPageThatSaysItIsASourceList…` 等 |
+| `text` 带着括号说明 | `TestAPageWithNoTextAndAnOffsetPastTheEnd…` |
+| 读取没有 `nextOffset` / 永不 `truncated` | `TestAFetchIsComplete…`、`TestACutPDFAndAPDF…` 等 |
+| 读取没有 `notice` | `TestAPageWithNoTextAndAnOffsetPastTheEnd…` |
+| 读取没有 `pdf` / `cut` 恒为 false | `TestACutPDFAndAPDFThatIsWholeSayItInTheStructure` |
+| 读取没有 `ref` | `TestAFetchIsComplete…`、`TestTheNumberAndTheRefOfASearch…` |
+| 读取没有 `total` | 所有读取的 `Contract` 测试 |
+| `sha256` 不是这一段的 | 所有读取的 `Contract` 测试、`TestAPDFIsHeadedAsOne…` |
+| schema 少一个属性（`excerpt`、`text`） | `Contract` 测试（`additionalProperties: false`）与 `TestToolsListCarries…`（摘要） |
+| schema 不要求 `ref` | `TestTheValidatorHoldsAResult…`、`TestToolsListCarries…`（摘要） |
+| schema 允许多余字段 | `TestEveryToolDeclares…`、`TestTheValidatorHoldsAResult…` 等 |
+| `web_open_url` 声明另一个 schema | `TestEveryToolDeclares…` 与读取的 `Contract` 测试 |
+| 文字内容的 `excerpt:` 标签被改 | `Contract` 测试、`TestSearchThenFetchReturnsThePage…`（文字不变这一条） |
+| 文字内容首行的 `–` 换成 `-` | `Contract` 测试、`TestACutPDFSaysItIsCutInTheHead…` 等 |
+| 没有结果时 `citations` 是 `null` | `TestAnEmptySearchResultIsAnEmptyList…` |
